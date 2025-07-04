@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup, NavigableString
 from fastapi.exceptions import HTTPException
 import logging
 import re
+import base64
 
 app = FastAPI()
 
@@ -366,7 +367,7 @@ def _caption_image_internal(
     output_buffer = io.BytesIO()
     result.save(output_buffer, format="PNG")
     output_buffer.seek(0)
-    return output_buffer.getvalue().hex()
+    return base64.b64encode(output_buffer.getvalue()).decode('utf-8')
 
 @app.post("/caption-image")
 def caption_image(req: CaptionRequest):
@@ -383,7 +384,7 @@ def caption_image(req: CaptionRequest):
         results = []
         for text_content in req.texts:
             try:
-                captioned_image_hex = _caption_image_internal(
+                captioned_image_b64 = _caption_image_internal(
                     original_img=original_img,
                     text_content=text_content,
                     font_family=req.font_family,
@@ -395,7 +396,7 @@ def caption_image(req: CaptionRequest):
                     margin_bottom=req.margin_bottom,
                     transition_proportion=req.transition_proportion
                 )
-                results.append({"success": True, "image": captioned_image_hex})
+                results.append({"success": True, "image": captioned_image_b64})
             except Exception as e:
                 logging.error(f"Error processing text '{text_content}': {e}", exc_info=True)
                 results.append({"success": False, "error": str(e)})

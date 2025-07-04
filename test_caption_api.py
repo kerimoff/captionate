@@ -44,9 +44,9 @@ try:
     if "images" in response_data:
         for i, item in enumerate(response_data["images"]):
             if item.get("success"):
-                hex_image_data = item["image"]
-                # Decode hex string to bytes
-                image_bytes = bytes.fromhex(hex_image_data)
+                b64_image_data = item["image"]
+                # Decode base64 string to bytes
+                image_bytes = base64.b64decode(b64_image_data)
                 
                 # Save the image to a file in the new directory
                 file_name = os.path.join(output_dir, f"captioned_image_{i+1}.png")
