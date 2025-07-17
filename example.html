@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Captionato.js Example</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            font-weight: bold;
+            margin-bottom: 5px;
+            color: #555;
+        }
+        input, select, textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+        textarea {
+            height: 100px;
+            resize: vertical;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            width: 100%;
+            margin-top: 10px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+        .results {
+            margin-top: 30px;
+            text-align: center;
+        }
+        .result-image {
+            max-width: 100%;
+            margin: 10px 0;
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        .error {
+            color: #dc3545;
+            background-color: #f8d7da;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        .success {
+            color: #155724;
+            background-color: #d4edda;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        .form-row {
+            display: flex;
+            gap: 15px;
+        }
+        .form-row .form-group {
+            flex: 1;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Captionato.js - Image Captioning Demo</h1>
+        
+        <form id="captionForm">
+            <div class="form-group">
+                <label for="imageUrl">Image URL:</label>
+                <input type="url" id="imageUrl" placeholder="https://example.com/image.jpg" 
+                       value="https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=800">
+            </div>
+            
+            <div class="form-group">
+                <label for="texts">Caption Text (supports &lt;b&gt;, &lt;i&gt;, &lt;u&gt;, &lt;br&gt; tags):</label>
+                <textarea id="texts" placeholder="Enter caption text...">&lt;b&gt;Beautiful Mountain&lt;/b&gt;&lt;br&gt;&lt;i&gt;A stunning view of nature&lt;/i&gt;</textarea>
+            </div>
+            
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="fontFamily">Font Family:</label>
+                    <select id="fontFamily">
+                        <option value="Montserrat">Montserrat</option>
+                        <option value="Nunito">Nunito</option>
+                        <option value="Poppins">Poppins</option>
+                        <option value="Roboto">Roboto</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="textPosition">Text Position:</label>
+                    <select id="textPosition">
+                        <option value="bottom">Bottom</option>
+                        <option value="top">Top</option>
+                    </select>
+                </div>
+            </div>
+            
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="backgroundHeight">Background Height (0.1 - 1.0):</label>
+                    <input type="number" id="backgroundHeight" min="0.1" max="1.0" step="0.1" value="0.4">
+                </div>
+                
+                <div class="form-group">
+                    <label for="backgroundColor">Background Color (RGBA):</label>
+                    <input type="text" id="backgroundColor" value="rgba(0, 0, 0, 180)">
+                </div>
+            </div>
+            
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="marginHorizontal">Horizontal Margin (%):</label>
+                    <input type="number" id="marginHorizontal" min="0" max="50" value="10">
+                </div>
+                
+                <div class="form-group">
+                    <label for="transitionProportion">Transition Proportion (0.0 - 1.0):</label>
+                    <input type="number" id="transitionProportion" min="0" max="1" step="0.1" value="0.2">
+                </div>
+            </div>
+            
+            <button type="submit" id="generateBtn">Generate Caption</button>
+        </form>
+        
+        <div id="results" class="results"></div>
+    </div>
+
+    <script src="dist/captionato.js"></script>
+    <script>
+        document.getElementById('captionForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const generateBtn = document.getElementById('generateBtn');
+            const resultsDiv = document.getElementById('results');
+            
+            // Disable button and show loading
+            generateBtn.disabled = true;
+            generateBtn.textContent = 'Generating...';
+            resultsDiv.innerHTML = '<div class="success">Processing image...</div>';
+            
+            try {
+                const options = {
+                    imageUrl: document.getElementById('imageUrl').value,
+                    texts: [document.getElementById('texts').value],
+                    fontFamily: document.getElementById('fontFamily').value,
+                    textPosition: document.getElementById('textPosition').value,
+                    backgroundHeight: parseFloat(document.getElementById('backgroundHeight').value),
+                    backgroundColor: document.getElementById('backgroundColor').value,
+                    marginHorizontal: parseInt(document.getElementById('marginHorizontal').value),
+                    transitionProportion: parseFloat(document.getElementById('transitionProportion').value)
+                };
+                
+                const results = await Captionato.captionImage(options);
+                
+                resultsDiv.innerHTML = '';
+                
+                results.forEach((result, index) => {
+                    if (result.success) {
+                        resultsDiv.innerHTML += `
+                            <div class="success">Caption ${index + 1} generated successfully!</div>
+                            <img src="${result.dataUrl}" alt="Captioned Image ${index + 1}" class="result-image">
+                        `;
+                    } else {
+                        resultsDiv.innerHTML += `
+                            <div class="error">Error generating caption ${index + 1}: ${result.error}</div>
+                        `;
+                    }
+                });
+                
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+            } finally {
+                // Re-enable button
+                generateBtn.disabled = false;
+                generateBtn.textContent = 'Generate Caption';
+            }
+        });
+    </script>
+</body>
+</html>

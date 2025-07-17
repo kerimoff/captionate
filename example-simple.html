@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simple Captionato.js Example</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            text-align: center;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 20px 0;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        #result {
+            margin-top: 20px;
+        }
+        canvas {
+            max-width: 100%;
+            border-radius: 10px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+    </style>
+</head>
+<body>
+    <h1>Simple Captionato.js Example</h1>
+    <p>Click the button to add a caption to a sample image:</p>
+    
+    <button onclick="addCaption()">Add Caption</button>
+    
+    <div id="result"></div>
+
+    <script src="dist/captionato.js"></script>
+    <script>
+        async function addCaption() {
+            try {
+                const results = await Captionato.captionImage({
+                    imageUrl: 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=800',
+                    texts: ['<b>Beautiful Mountain View</b><br><i>Nature at its finest</i>'],
+                    fontFamily: 'Montserrat',
+                    textPosition: 'bottom',
+                    backgroundColor: 'rgba(0, 0, 0, 200)'
+                });
+                
+                if (results[0].success) {
+                    document.getElementById('result').innerHTML = '';
+                    document.getElementById('result').appendChild(results[0].canvas);
+                } else {
+                    document.getElementById('result').innerHTML = 
+                        `<p style="color: red;">Error: ${results[0].error}</p>`;
+                }
+            } catch (error) {
+                document.getElementById('result').innerHTML = 
+                    `<p style="color: red;">Error: ${error.message}</p>`;
+            }
+        }
+    </script>
+</body>
+</html>
