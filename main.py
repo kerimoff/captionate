@@ -1,12 +1,13 @@
 from fastapi import FastAPI, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from typing import Literal, Set, List
+from typing import Literal, Set, List, Union
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 import requests
 import io
 import html
-from bs4 import BeautifulSoup, NavigableString
+from bs4 import BeautifulSoup
+from bs4.element import NavigableString
 from fastapi.exceptions import HTTPException
 import logging
 import re
@@ -99,8 +100,15 @@ def get_font_for_style(font_family_name: str, base_size: int, styles: Set[str]) 
             except IOError as e_default_fallback:
                 logging.error(f"Default fallback font {DEFAULT_FALLBACK_STYLE_PATH} also failed: {e_default_fallback}")
 
-        logging.error("All font fallbacks failed. Using Pillow's load_default().")
-        return ImageFont.load_default() 
+        # Last resort: try to create a basic font
+        try:
+            return ImageFont.truetype("arial.ttf", base_size)
+        except IOError:
+            try:
+                return ImageFont.truetype("/System/Library/Fonts/Arial.ttf", base_size)
+            except IOError:
+                logging.error("All font fallbacks failed including system fonts.")
+                raise Exception("Unable to load any font")
 
 
 def parse_html_text(html_text: str) -> list[list[tuple[str, Set[str]]]]:
@@ -193,7 +201,7 @@ def _caption_image_internal(
     margin_top: int,
     margin_bottom: int,
     transition_proportion: float
-) -> str:
+) -> dict[str, str]:
     img = original_img.copy()
     width, height = img.size
 
@@ -208,31 +216,49 @@ def _caption_image_internal(
     transition_height_px = int(round(bg_height * transition_proportion))
     if transition_height_px > 0 and bg_height > 0:
         pixels = overlay.load()
+        if pixels is None:
+            logging.warning("Failed to load overlay pixels for gradient transition")
+        else:
+            if text_position == "bottom":
+                for y_coord in range(transition_height_px):
+                    if transition_height_px == 1:
+                        alpha_factor = 0.0 
+                    else:
+                        alpha_factor = y_coord / (transition_height_px - 1.0)
+                    
+                    current_alpha = int(round(base_a * alpha_factor))
+                    for x_coord in range(width):
+                        pixels[x_coord, y_coord] = (base_r, base_g, base_b, current_alpha)
+            
+            elif text_position == "top":
+                transition_zone_start_y = bg_height - transition_height_px
+                for y_idx, y_coord in enumerate(range(transition_zone_start_y, bg_height)):
+                    if transition_height_px == 1:
+                        alpha_factor = 0.0
+                    else:
+                        alpha_factor = (transition_height_px - 1.0 - y_idx) / (transition_height_px - 1.0)
+                    
+                    current_alpha = int(round(base_a * alpha_factor))
+                    for x_coord in range(width):
+                        pixels[x_coord, y_coord] = (base_r, base_g, base_b, current_alpha)
 
-        if text_position == "bottom":
-            for y_coord in range(transition_height_px):
-                if transition_height_px == 1:
-                    alpha_factor = 0.0 
-                else:
-                    alpha_factor = y_coord / (transition_height_px - 1.0)
-                
-                current_alpha = int(round(base_a * alpha_factor))
-                for x_coord in range(width):
-                    pixels[x_coord, y_coord] = (base_r, base_g, base_b, current_alpha)
-        
-        elif text_position == "top":
-            transition_zone_start_y = bg_height - transition_height_px
-            for y_idx, y_coord in enumerate(range(transition_zone_start_y, bg_height)):
-                if transition_height_px == 1:
-                    alpha_factor = 0.0
-                else:
-                    alpha_factor = (transition_height_px - 1.0 - y_idx) / (transition_height_px - 1.0)
-                
-                current_alpha = int(round(base_a * alpha_factor))
-                for x_coord in range(width):
-                    pixels[x_coord, y_coord] = (base_r, base_g, base_b, current_alpha)
+    # Create background-only image (original + overlay without text)
+    background_only_img = img.copy()
+    if text_position == "bottom":
+        position = (0, height - bg_height)
+    else:
+        position = (0, 0)
+    background_only_img.alpha_composite(overlay, dest=position)
 
-    draw = ImageDraw.Draw(overlay)
+    # Convert background-only image to base64
+    bg_output_buffer = io.BytesIO()
+    background_only_img.save(bg_output_buffer, format="PNG")
+    bg_output_buffer.seek(0)
+    background_only_b64 = base64.b64encode(bg_output_buffer.getvalue()).decode('utf-8')
+
+    # Create text-only image (transparent background with same dimensions as overlay)
+    text_only_overlay = Image.new("RGBA", (width, bg_height), (0, 0, 0, 0))  # Fully transparent
+    draw = ImageDraw.Draw(text_only_overlay)
     
     logical_lines_styled = parse_html_text(text_content)
 
@@ -357,17 +383,89 @@ def _caption_image_internal(
             
             current_y += line_actual_height
     
-    result = img.copy()
+    # Convert text-only image to base64
+    text_output_buffer = io.BytesIO()
+    text_only_overlay.save(text_output_buffer, format="PNG")
+    text_output_buffer.seek(0)
+    text_only_b64 = base64.b64encode(text_output_buffer.getvalue()).decode('utf-8')
+
+    # Create final combined image by adding text to the original overlay and compositing
+    draw_final = ImageDraw.Draw(overlay)
+    
+    # Render text on the original overlay for final combined image
+    if best_font_size > 0 and final_renderable_lines_layout:
+        font = get_font_for_style(font_family, best_font_size, set())
+        
+        actual_total_text_height = sum(line_info["height"] for line_info in final_renderable_lines_layout if isinstance(line_info, dict) and "height" in line_info)
+        
+        available_height_for_text = bg_height - margin_top_px - margin_bottom_px
+        padding_top_final = 0
+        if actual_total_text_height > 0 and actual_total_text_height < available_height_for_text:
+            padding_top_final = (available_height_for_text - actual_total_text_height) // 2
+        
+        current_y = margin_top_px + padding_top_final
+
+        for line_info in final_renderable_lines_layout:
+            if not line_info:
+                dummy_font_for_empty_line = get_font_for_style(font_family, best_font_size, set())
+                empty_line_ascent, empty_line_descent = dummy_font_for_empty_line.getmetrics()
+                current_y += (empty_line_ascent + empty_line_descent)
+                continue
+
+            line_segments = line_info["segments"]
+            line_actual_height = line_info["height"]
+            line_max_ascent = line_info["max_ascent"]
+
+            current_line_total_width = sum(seg["width"] for seg in line_segments)
+            
+            start_x_for_line = margin_x_px + (width - 2 * margin_x_px - current_line_total_width) // 2
+            start_x_for_line = max(margin_x_px, start_x_for_line)
+
+            current_x_draw = start_x_for_line
+            
+            for segment in line_segments:
+                seg_text = segment["text"]
+                seg_font = segment["font"]
+                seg_styles = segment["styles"]
+                
+                y_draw_pos = current_y + (line_max_ascent - segment["ascent"])
+
+                draw_final.text((current_x_draw, y_draw_pos), seg_text, font=seg_font, fill="white")
+
+                if 'underline' in seg_styles:
+                    underline_y_pos = y_draw_pos + segment["ascent"] + 2
+                    draw_final.line([(current_x_draw, underline_y_pos), 
+                               (current_x_draw + segment["width"], underline_y_pos)], 
+                              fill="white", width=1)
+
+                current_x_draw += segment["width"]
+            
+            current_y += line_actual_height
+
+    # Combine background and text for final image
+    final_combined_img = img.copy()
     if text_position == "bottom":
         position = (0, height - bg_height)
     else:
         position = (0, 0)
-    result.alpha_composite(overlay, dest=position)
+    final_combined_img.alpha_composite(overlay, dest=position)
 
-    output_buffer = io.BytesIO()
-    result.save(output_buffer, format="PNG")
-    output_buffer.seek(0)
-    return base64.b64encode(output_buffer.getvalue()).decode('utf-8')
+    # Convert final combined image to base64
+    final_output_buffer = io.BytesIO()
+    final_combined_img.save(final_output_buffer, format="PNG")
+    final_output_buffer.seek(0)
+    final_combined_b64 = base64.b64encode(final_output_buffer.getvalue()).decode('utf-8')
+
+    result = {
+        "background_only": background_only_b64,
+        "text_only": text_only_b64,
+        "final_combined": final_combined_b64
+    }
+    return result
+
+@app.get("/test")
+def test_endpoint():
+    return {"message": "Server is running updated code with three image outputs", "timestamp": "2025-07-17"}
 
 @app.post("/caption-image")
 def caption_image(req: CaptionRequest):
@@ -384,7 +482,7 @@ def caption_image(req: CaptionRequest):
         results = []
         for text_content in req.texts:
             try:
-                captioned_image_b64 = _caption_image_internal(
+                captioned_images = _caption_image_internal(
                     original_img=original_img,
                     text_content=text_content,
                     font_family=req.font_family,
@@ -396,7 +494,12 @@ def caption_image(req: CaptionRequest):
                     margin_bottom=req.margin_bottom,
                     transition_proportion=req.transition_proportion
                 )
-                results.append({"success": True, "image": captioned_image_b64})
+                results.append({
+                    "success": True, 
+                    "background_only": captioned_images["background_only"],
+                    "text_only": captioned_images["text_only"], 
+                    "final_combined": captioned_images["final_combined"]
+                })
             except Exception as e:
                 logging.error(f"Error processing text '{text_content}': {e}", exc_info=True)
                 results.append({"success": False, "error": str(e)})
