@@ -8,7 +8,7 @@ from typing import Optional
 from dotenv import load_dotenv
 import dropbox
 from dropbox import files
-from moviepy import VideoFileClip, ImageClip, CompositeVideoClip, vfx, ColorClip
+from moviepy import VideoFileClip, ImageClip, CompositeVideoClip, vfx, ColorClip, AudioFileClip
 
 def create_video_with_parameters(
     dropbox_folder_path: str,
@@ -195,26 +195,30 @@ def create_video_with_parameters(
             
             line_clips.append(segment_clip)
     
-    # Composite all clips together
+    
+
     print("Compositing video...")
-    final_video = CompositeVideoClip([background_clip] + text_clips + line_clips)
-    
-    # Set video properties
-    final_video = final_video.with_fps(fps)
-    
-    # Export video
+    final_video = CompositeVideoClip([background_clip] + text_clips + line_clips) \
+                    .with_fps(fps)                           # v2 keeps with_fps
+
+    # --- Add external music, trimmed to the clip length ---
+    audio_path = "music/lofi-for-tiktok-369050.mp3"
+    audio_clip = AudioFileClip(audio_path).subclipped(0, final_video.duration)  # trim  [oai_citation:1‡Bastaki Software Solutions L.L.C-FZ](https://bastakiss.com/blog/python-5/exploring-moviepy-2-a-modern-approach-to-video-editing-in-python-618?utm_source=chatgpt.com)
+    final_video = final_video.with_audio(audio_clip)                            # v2 helper  [oai_citation:2‡GeeksforGeeks](https://www.geeksforgeeks.org/python/moviepy-assigning-audio-clip-to-video-file/)
+
+    # --- Export ---
     output_path = "media/videos/moviepy_output.mp4"
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    
+
     print(f"Exporting video to: {output_path}")
     final_video.write_videofile(
         output_path,
-        codec=codec,
-        audio=False,
-        temp_audiofile='temp-audio.m4a',
-        remove_temp=True
+        codec=codec,            # e.g. "libx264"
+        audio_codec="aac",      # required for MP4
+        audio_bitrate="192k",   # keep MP3 quality
+        temp_audiofile="temp-audio.m4a",
+        remove_temp=True,
     )
-    
     print("Video creation completed!")
     print(f"Output file: {output_path}")
 
