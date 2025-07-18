@@ -2,7 +2,7 @@ import dropbox
 import os
 
 # Dropbox Access Token (get this from your Dropbox App console)
-ACCESS_TOKEN = os.getenv('DROPBOX_API_TOKEN')
+ACCESS_TOKEN = os.getenv('DROPBOX_ACCESS_TOKEN')
 DROPBOX_FOLDER_PATH = '/temp/20_52_07'  # Root path or subfolder
 
 # Local folder to save files

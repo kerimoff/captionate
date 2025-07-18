@@ -3,6 +3,7 @@
 import os
 import re
 import glob
+import shutil
 from typing import Optional
 from dotenv import load_dotenv
 import dropbox
@@ -226,6 +227,11 @@ def create_video_with_parameters(
         except Exception as e:
             print(f"Error uploading to Dropbox: {e}")
             
+    local_save_path = './downloaded_files'
+    # remove the local save path
+    shutil.rmtree(local_save_path)
+
+    
     return output_path
 
 
@@ -243,9 +249,9 @@ def download_from_dropbox(dropbox_folder_path: str) -> str:
     str : Local folder path where files were downloaded
     """
     # Get Dropbox token from environment
-    access_token = os.getenv('DROPBOX_API_TOKEN')
+    access_token = os.getenv('DROPBOX_ACCESS_TOKEN')
     if not access_token:
-        raise ValueError("DROPBOX_API_TOKEN not found in .env file. Please add it to your .env file.")
+        raise ValueError("DROPBOX_ACCESS_TOKEN not found in .env file. Please add it to your .env file.")
     
     # Local folder to save files
     local_save_path = './downloaded_files'
@@ -293,9 +299,9 @@ def upload_to_dropbox(local_file_path: str, dropbox_upload_path: str):
     dropbox_upload_path : str
         The destination path in Dropbox (e.g., "/Apps/CaptiOnAte/my_video.mp4").
     """
-    access_token = os.getenv('DROPBOX_API_TOKEN')
+    access_token = os.getenv('DROPBOX_ACCESS_TOKEN')
     if not access_token:
-        raise ValueError("DROPBOX_API_TOKEN not found in .env file. Please add it to your .env file.")
+        raise ValueError("DROPBOX_ACCESS_TOKEN not found in .env file. Please add it to your .env file.")
     
     try:
         dbx = dropbox.Dropbox(access_token)

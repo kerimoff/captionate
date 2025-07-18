@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Literal, Set, List, Union, Optional
@@ -18,6 +18,7 @@ from typing import Optional
 from dotenv import load_dotenv
 from dropbox.files import WriteMode
 from dropbox.exceptions import ApiError
+from video_generator_parameterized import create_video_with_parameters
 
 load_dotenv()
 
@@ -71,6 +72,21 @@ class CaptionRequest(BaseModel):
     margin_bottom: int = Field(default=10, ge=0)
     transition_proportion: float = Field(default=0.2, ge=0.0, le=1.0)
     dropbox_dir: Optional[str] = None
+
+
+class VideoGenerationRequest(BaseModel):
+    dropbox_folder_path: str
+    local_folder_path: Optional[str] = None
+    save_to_dropbox: bool = False
+    video_duration_per_text: float = 5.0
+    fade_duration: float = 0.5
+    line_horizontal_margin: int = 20
+    line_bottom_margin: int = 20
+    line_thickness: int = 3
+    line_color: str = "#FFFF00"
+    fps: int = 30
+    codec: str = 'libx264'
+    line_segments_per_second: int = 30
 
 
 def upload_and_get_temporary_link(file_content: bytes, dropbox_path: str) -> Optional[str]:
@@ -548,3 +564,34 @@ def caption_image(req: CaptionRequest):
     except Exception as e:
         logging.error(f"Unexpected error in caption_image: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
+
+
+@app.post("/generate-video")
+async def generate_video(req: VideoGenerationRequest, background_tasks: BackgroundTasks):
+    background_tasks.add_task(
+        create_video_with_parameters,
+        dropbox_folder_path=req.dropbox_folder_path,
+        local_folder_path=req.local_folder_path,
+        save_to_dropbox=req.save_to_dropbox,
+        video_duration_per_text=req.video_duration_per_text,
+        fade_duration=req.fade_duration,
+        line_horizontal_margin=req.line_horizontal_margin,
+        line_bottom_margin=req.line_bottom_margin,
+        line_thickness=req.line_thickness,
+        line_color=req.line_color,
+        fps=req.fps,
+        codec=req.codec,
+        line_segments_per_second=req.line_segments_per_second,
+    )
+
+    response_data = {
+        "message": "Video generation started in the background."
+    }
+
+    if req.save_to_dropbox:
+        video_name = "moviepy_output.mp4"
+        response_data["dropbox_video_path"] = f"{req.dropbox_folder_path.rstrip('/')}/{video_name}"
+    else:
+        response_data["local_video_path"] = "media/videos/moviepy_output.mp4"
+
+    return response_data
