@@ -117,8 +117,10 @@ def create_video_with_parameters(
     # Create background clip (constant throughout video)
     print("Creating background clip...")
     background_clip = (ImageClip(background_path)
-                      .with_duration(total_duration)
-                      .resized(height=1080))  # Set to 1080p height
+                      .with_duration(total_duration))
+
+    # Get video dimensions from background clip
+    video_height = background_clip.h
     
     # Create text clips with fade animations
     text_clips = []
@@ -130,14 +132,13 @@ def create_video_with_parameters(
         text_clip = (ImageClip(text_path)
                     .with_duration(video_duration_per_text)
                     .with_start(start_time)
-                    .resized(height=1080)
+                    .resized(height=video_height)
                     .with_effects([vfx.FadeIn(fade_duration), vfx.FadeOut(fade_duration)]))
         
         text_clips.append(text_clip)
     
     # Get video dimensions for line positioning
     video_width = background_clip.w
-    video_height = background_clip.h
     
     # Calculate line dimensions and position
     horizontal_margin_each_side = line_horizontal_margin / 2
@@ -151,13 +152,21 @@ def create_video_with_parameters(
     for i, text_path in enumerate(text_files):
         start_time = i * video_duration_per_text
         line_start_time = start_time + fade_duration
-        line_duration = text_display_duration
         
         print(f"Creating line clip {i+1}/{len(text_files)}")
         
-        # Line animation parameters
-        line_animation_duration = 4.0
+        # The line should finish drawing just as the text starts to fade out.
+        line_animation_duration = video_duration_per_text - 2 * fade_duration
+        
+        if line_animation_duration <= 0:
+            print(f"Warning: line_animation_duration is {line_animation_duration}. Check video_duration_per_text and fade_duration.")
+            continue
+
         total_segments = int(line_animation_duration * line_segments_per_second)
+        if total_segments == 0:
+            print(f"Warning: total_segments is 0. Line animation may not be visible.")
+            continue
+
         segment_width = line_width / total_segments
         segment_delay = line_animation_duration / total_segments
         
@@ -165,12 +174,14 @@ def create_video_with_parameters(
         for segment_idx in range(total_segments):
             segment_start_time = line_start_time + (segment_idx * segment_delay)
             segment_x_position = line_left_margin + (segment_idx * segment_width)
-            segment_duration = line_duration - (segment_idx * segment_delay)
+            
+            # Duration should make the segment last until the text clip ends.
+            segment_duration = (start_time + video_duration_per_text) - segment_start_time
             
             if segment_duration <= 0:
                 continue
             
-            segment_clip = (ColorClip(size=(max(1, int(segment_width * 2)), line_thickness), 
+            segment_clip = (ColorClip(size=(max(1, int(segment_width * 2)), line_thickness),
                                     color=line_color_rgb)
                            .with_duration(segment_duration)
                            .with_start(segment_start_time)
@@ -262,15 +273,15 @@ if __name__ == "__main__":
     try:
         # Example with default parameters
         output_file = create_video_with_parameters(
-           dropbox_folder_path="/temp/20_52_07",        # Ignored since we use local files
-            # local_folder_path="downloaded_files",     # Use existing local files
+            dropbox_folder_path="/temp/20_52_07",        # Ignored since we use local files
+            local_folder_path="downloaded_files_new",     # Use existing local files
             video_duration_per_text=5.0,             # 5 seconds per text
-            fade_duration=0.5,                       # 0.5 second fade in/out
+            fade_duration=0.2,                       # 0.5 second fade in/out
             line_horizontal_margin=20,               # 20% total margin (10% each side)
             line_bottom_margin=70,                   # 20% from bottom
             line_thickness=5,                        # 3 pixel thick line
             line_color="#FFFF00",                    # Yellow line
-            fps=60,                                  # 30 fps for good quality
+            fps=30,                                  # 30 fps for good quality
             codec='libx264',                         # H.264 codec
             line_segments_per_second=60           
         )
