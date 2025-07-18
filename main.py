@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from typing import Literal, Set, List, Union
+from typing import Literal, Set, List, Union, Optional
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 import requests
 import io
@@ -12,6 +12,12 @@ from fastapi.exceptions import HTTPException
 import logging
 import re
 import base64
+import dropbox
+import os
+from typing import Optional
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = FastAPI()
 
@@ -62,6 +68,21 @@ class CaptionRequest(BaseModel):
     margin_top: int = Field(default=10, ge=0)
     margin_bottom: int = Field(default=10, ge=0)
     transition_proportion: float = Field(default=0.2, ge=0.0, le=1.0)
+    dropbox_dir: Optional[str] = None
+
+
+def upload_to_dropbox(file_content: bytes, dropbox_path: str):
+    access_token = os.getenv('DROPBOX_ACCESS_TOKEN')
+    if not access_token:
+        logging.error("DROPBOX_ACCESS_TOKEN environment variable not set.")
+        return
+
+    try:
+        dbx = dropbox.Dropbox(access_token)
+        dbx.files_upload(file_content, dropbox_path)
+        logging.info(f"Successfully uploaded to Dropbox: {dropbox_path}")
+    except Exception as e:
+        logging.error(f"Failed to upload to Dropbox: {e}")
 
 
 def get_font_for_style(font_family_name: str, base_size: int, styles: Set[str]) -> ImageFont.FreeTypeFont:
@@ -190,26 +211,18 @@ def rgba_from_string(rgba_str: str) -> tuple[int, int, int, int]:
         return (0, 0, 0, 180)
 
 
-def _caption_image_internal(
+def _generate_background_once(
     original_img: Image.Image,
-    text_content: str,
-    font_family: Literal["Montserrat", "Nunito", "Poppins", "Roboto"],
     text_position: Literal["top", "bottom"],
     background_height: float,
     background_color: str,
-    margin_horizontal: int,
-    margin_top: int,
-    margin_bottom: int,
     transition_proportion: float
-) -> dict[str, str]:
+) -> dict[str, Union[str, Image.Image]]:
     img = original_img.copy()
     width, height = img.size
 
     bg_height = int(height * background_height)
-    margin_x_px = int((margin_horizontal / 100) * width / 2)
-    margin_top_px = int((margin_top / 100) * bg_height)
-    margin_bottom_px = int((margin_bottom / 100) * bg_height)
-
+    
     base_r, base_g, base_b, base_a = rgba_from_string(background_color)
     overlay = Image.new("RGBA", (width, bg_height), (base_r, base_g, base_b, base_a))
     
@@ -242,7 +255,6 @@ def _caption_image_internal(
                     for x_coord in range(width):
                         pixels[x_coord, y_coord] = (base_r, base_g, base_b, current_alpha)
 
-    # Create background-only image (original + overlay without text)
     background_only_img = img.copy()
     if text_position == "bottom":
         position = (0, height - bg_height)
@@ -250,14 +262,36 @@ def _caption_image_internal(
         position = (0, 0)
     background_only_img.alpha_composite(overlay, dest=position)
 
-    # Convert background-only image to base64
     bg_output_buffer = io.BytesIO()
     background_only_img.save(bg_output_buffer, format="PNG")
     bg_output_buffer.seek(0)
     background_only_b64 = base64.b64encode(bg_output_buffer.getvalue()).decode('utf-8')
 
-    # Create text-only image (transparent background with same dimensions as overlay)
-    text_only_overlay = Image.new("RGBA", (width, bg_height), (0, 0, 0, 0))  # Fully transparent
+    return {
+        "background_only_b64": background_only_b64,
+        "overlay_image": overlay
+    }
+
+
+def _generate_text_and_combined_image_from_background(
+    original_img: Image.Image,
+    overlay_image: Image.Image,
+    text_content: str,
+    font_family: Literal["Montserrat", "Nunito", "Poppins", "Roboto"],
+    text_position: Literal["top", "bottom"],
+    background_height: float,
+    margin_horizontal: int,
+    margin_top: int,
+    margin_bottom: int,
+) -> dict[str, str]:
+    img = original_img.copy()
+    width, height = img.size
+    bg_height = int(height * background_height)
+    margin_x_px = int((margin_horizontal / 100) * width / 2)
+    margin_top_px = int((margin_top / 100) * bg_height)
+    margin_bottom_px = int((margin_bottom / 100) * bg_height)
+
+    text_only_overlay = Image.new("RGBA", (width, bg_height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(text_only_overlay)
     
     logical_lines_styled = parse_html_text(text_content)
@@ -383,81 +417,27 @@ def _caption_image_internal(
             
             current_y += line_actual_height
     
-    # Convert text-only image to base64
     text_output_buffer = io.BytesIO()
     text_only_overlay.save(text_output_buffer, format="PNG")
     text_output_buffer.seek(0)
     text_only_b64 = base64.b64encode(text_output_buffer.getvalue()).decode('utf-8')
 
-    # Create final combined image by adding text to the original overlay and compositing
-    draw_final = ImageDraw.Draw(overlay)
-    
-    # Render text on the original overlay for final combined image
-    if best_font_size > 0 and final_renderable_lines_layout:
-        font = get_font_for_style(font_family, best_font_size, set())
-        
-        actual_total_text_height = sum(line_info["height"] for line_info in final_renderable_lines_layout if isinstance(line_info, dict) and "height" in line_info)
-        
-        available_height_for_text = bg_height - margin_top_px - margin_bottom_px
-        padding_top_final = 0
-        if actual_total_text_height > 0 and actual_total_text_height < available_height_for_text:
-            padding_top_final = (available_height_for_text - actual_total_text_height) // 2
-        
-        current_y = margin_top_px + padding_top_final
+    final_overlay_with_text = overlay_image.copy()
+    final_overlay_with_text.alpha_composite(text_only_overlay, (0, 0))
 
-        for line_info in final_renderable_lines_layout:
-            if not line_info:
-                dummy_font_for_empty_line = get_font_for_style(font_family, best_font_size, set())
-                empty_line_ascent, empty_line_descent = dummy_font_for_empty_line.getmetrics()
-                current_y += (empty_line_ascent + empty_line_descent)
-                continue
-
-            line_segments = line_info["segments"]
-            line_actual_height = line_info["height"]
-            line_max_ascent = line_info["max_ascent"]
-
-            current_line_total_width = sum(seg["width"] for seg in line_segments)
-            
-            start_x_for_line = margin_x_px + (width - 2 * margin_x_px - current_line_total_width) // 2
-            start_x_for_line = max(margin_x_px, start_x_for_line)
-
-            current_x_draw = start_x_for_line
-            
-            for segment in line_segments:
-                seg_text = segment["text"]
-                seg_font = segment["font"]
-                seg_styles = segment["styles"]
-                
-                y_draw_pos = current_y + (line_max_ascent - segment["ascent"])
-
-                draw_final.text((current_x_draw, y_draw_pos), seg_text, font=seg_font, fill="white")
-
-                if 'underline' in seg_styles:
-                    underline_y_pos = y_draw_pos + segment["ascent"] + 2
-                    draw_final.line([(current_x_draw, underline_y_pos), 
-                               (current_x_draw + segment["width"], underline_y_pos)], 
-                              fill="white", width=1)
-
-                current_x_draw += segment["width"]
-            
-            current_y += line_actual_height
-
-    # Combine background and text for final image
     final_combined_img = img.copy()
     if text_position == "bottom":
         position = (0, height - bg_height)
     else:
         position = (0, 0)
-    final_combined_img.alpha_composite(overlay, dest=position)
+    final_combined_img.alpha_composite(final_overlay_with_text, dest=position)
 
-    # Convert final combined image to base64
     final_output_buffer = io.BytesIO()
     final_combined_img.save(final_output_buffer, format="PNG")
     final_output_buffer.seek(0)
     final_combined_b64 = base64.b64encode(final_output_buffer.getvalue()).decode('utf-8')
 
     result = {
-        "background_only": background_only_b64,
         "text_only": text_only_b64,
         "final_combined": final_combined_b64
     }
@@ -479,24 +459,52 @@ def caption_image(req: CaptionRequest):
         response.raise_for_status()
         original_img = Image.open(io.BytesIO(response.content)).convert("RGBA")
 
+        background_data = _generate_background_once(
+            original_img=original_img,
+            text_position=req.text_position,
+            background_height=req.background_height,
+            background_color=req.background_color,
+            transition_proportion=req.transition_proportion
+        )
+        overlay_image = background_data["overlay_image"]
+        
+        if not isinstance(overlay_image, Image.Image):
+            raise TypeError("Generated overlay is not a valid PIL Image")
+
+        if req.dropbox_dir:
+            background_b64 = background_data.get("background_only_b64")
+            if isinstance(background_b64, str):
+                upload_to_dropbox(
+                    base64.b64decode(background_b64),
+                    f"{req.dropbox_dir}/background.png"
+                )
+
         results = []
-        for text_content in req.texts:
+        for i, text_content in enumerate(req.texts):
             try:
-                captioned_images = _caption_image_internal(
+                captioned_images = _generate_text_and_combined_image_from_background(
                     original_img=original_img,
+                    overlay_image=overlay_image,
                     text_content=text_content,
                     font_family=req.font_family,
                     text_position=req.text_position,
                     background_height=req.background_height,
-                    background_color=req.background_color,
                     margin_horizontal=req.margin_horizontal,
                     margin_top=req.margin_top,
                     margin_bottom=req.margin_bottom,
-                    transition_proportion=req.transition_proportion
                 )
+                if req.dropbox_dir:
+                    upload_to_dropbox(
+                        base64.b64decode(captioned_images["text_only"]),
+                        f"{req.dropbox_dir}/text_only/text_{i+1:02d}_text.png"
+                    )
+                    upload_to_dropbox(
+                        base64.b64decode(captioned_images["final_combined"]),
+                        f"{req.dropbox_dir}/final_combined/text_{i+1:02d}_combined.png"
+                    )
+
                 results.append({
                     "success": True, 
-                    "background_only": captioned_images["background_only"],
                     "text_only": captioned_images["text_only"], 
                     "final_combined": captioned_images["final_combined"]
                 })
@@ -504,7 +512,10 @@ def caption_image(req: CaptionRequest):
                 logging.error(f"Error processing text '{text_content}': {e}", exc_info=True)
                 results.append({"success": False, "error": str(e)})
         
-        return {"images": results}
+        return {
+            "background_only": background_data["background_only_b64"],
+            "images": results
+        }
 
     except requests.exceptions.RequestException as e:
         logging.error(f"Error fetching image: {e}")

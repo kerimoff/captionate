@@ -7,6 +7,7 @@ from datetime import datetime
 # Replace with your actual image URL and texts
 request_payload = {
     "image_url": "https://i.ibb.co/F4bPwd6T/mosquito.jpg", # Replace with a real image URL
+    "dropbox_dir": "/temp/18_07_2025",
     "text": [
         "The eye's lens changes shape <b>100,000 times per day</b> to focus.",
         "The human eye blinks about 17,000 times per day.",
@@ -34,30 +35,45 @@ try:
     response.raise_for_status() # Raise an exception for HTTP errors (4xx or 5xx)
     
     response_data = response.json()
+
+    # Save background_only image
+    if "background_only" in response_data:
+        bg_image_bytes = base64.b64decode(response_data["background_only"])
+        bg_file_name = os.path.join(output_dir, "background.png")
+        with open(bg_file_name, "wb") as f:
+            f.write(bg_image_bytes)
+        print(f"Saved {bg_file_name}")
+    else:
+        print("Warning: 'background_only' not found in response.")
+
+    # Create subdirectories for text_only and final_combined images
+    text_only_dir = os.path.join(output_dir, 'text_only')
+    final_combined_dir = os.path.join(output_dir, 'final_combined')
+    os.makedirs(text_only_dir, exist_ok=True)
+    os.makedirs(final_combined_dir, exist_ok=True)
     
     if "images" in response_data:
         for i, item in enumerate(response_data["images"]):
             if item.get("success"):
-                # Save all three image types
-                image_types = {
-                    "background_only": "background",
-                    "text_only": "text", 
-                    "final_combined": "combined"
-                }
-                
-                for image_key, image_type in image_types.items():
-                    if image_key in item:
-                        b64_image_data = item[image_key]
-                        # Decode base64 string to bytes
-                        image_bytes = base64.b64decode(b64_image_data)
-                        
-                        # Save the image to a file in the new directory
-                        file_name = os.path.join(output_dir, f"text_{i+1:02d}_{image_type}.png")
-                        with open(file_name, "wb") as f:
-                            f.write(image_bytes)
-                        print(f"Saved {file_name}")
-                    else:
-                        print(f"Warning: {image_key} not found in response for text {i+1}")
+                # Save text_only image
+                if "text_only" in item:
+                    text_only_bytes = base64.b64decode(item["text_only"])
+                    text_only_filename = os.path.join(text_only_dir, f"text_{i+1:02d}_text.png")
+                    with open(text_only_filename, "wb") as f:
+                        f.write(text_only_bytes)
+                    print(f"Saved {text_only_filename}")
+                else:
+                    print(f"Warning: 'text_only' not found for item {i+1}")
+
+                # Save final_combined image
+                if "final_combined" in item:
+                    final_combined_bytes = base64.b64decode(item["final_combined"])
+                    final_combined_filename = os.path.join(final_combined_dir, f"text_{i+1:02d}_combined.png")
+                    with open(final_combined_filename, "wb") as f:
+                        f.write(final_combined_bytes)
+                    print(f"Saved {final_combined_filename}")
+                else:
+                    print(f"Warning: 'final_combined' not found for item {i+1}")
             else:
                 print(f"Error processing image {i+1}: {item.get('error', 'Unknown error')}")
     else:

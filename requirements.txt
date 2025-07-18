@@ -1,9 +1,10 @@
+dropbox
 fastapi
-uvicorn
 Pillow
 requests
 beautifulsoup4
-pydantic
+uvicorn
+python-multipart
+lxml
+html5lib
 python-dotenv
-moviepy
-dropbox
