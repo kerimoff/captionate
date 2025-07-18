@@ -16,6 +16,8 @@ import dropbox
 import os
 from typing import Optional
 from dotenv import load_dotenv
+from dropbox.files import WriteMode
+from dropbox.exceptions import ApiError
 
 load_dotenv()
 
@@ -71,18 +73,30 @@ class CaptionRequest(BaseModel):
     dropbox_dir: Optional[str] = None
 
 
-def upload_to_dropbox(file_content: bytes, dropbox_path: str):
+def upload_and_get_temporary_link(file_content: bytes, dropbox_path: str) -> Optional[str]:
     access_token = os.getenv('DROPBOX_ACCESS_TOKEN')
     if not access_token:
         logging.error("DROPBOX_ACCESS_TOKEN environment variable not set.")
-        return
+        return None
 
     try:
         dbx = dropbox.Dropbox(access_token)
-        dbx.files_upload(file_content, dropbox_path)
+        dbx.files_upload(file_content, dropbox_path, mode=WriteMode('overwrite'))
         logging.info(f"Successfully uploaded to Dropbox: {dropbox_path}")
+        
+        link_result = dbx.files_get_temporary_link(dropbox_path)
+        if link_result:
+            logging.info(f"Successfully created temporary link for: {dropbox_path}")
+            return link_result.link
+        else:
+            logging.error(f"Failed to get temporary link for {dropbox_path}")
+            return None
+    except ApiError as e:
+        logging.error(f"Dropbox API error when processing {dropbox_path}: {e}")
+        return None
     except Exception as e:
-        logging.error(f"Failed to upload to Dropbox: {e}")
+        logging.error(f"Failed to upload or get temporary link from Dropbox for {dropbox_path}: {e}")
+        return None
 
 
 def get_font_for_style(font_family_name: str, base_size: int, styles: Set[str]) -> ImageFont.FreeTypeFont:
@@ -471,14 +485,6 @@ def caption_image(req: CaptionRequest):
         if not isinstance(overlay_image, Image.Image):
             raise TypeError("Generated overlay is not a valid PIL Image")
 
-        if req.dropbox_dir:
-            background_b64 = background_data.get("background_only_b64")
-            if isinstance(background_b64, str):
-                upload_to_dropbox(
-                    base64.b64decode(background_b64),
-                    f"{req.dropbox_dir}/background.png"
-                )
-
         results = []
         for i, text_content in enumerate(req.texts):
             try:
@@ -493,29 +499,48 @@ def caption_image(req: CaptionRequest):
                     margin_top=req.margin_top,
                     margin_bottom=req.margin_bottom,
                 )
+
                 if req.dropbox_dir:
-                    upload_to_dropbox(
+                    text_only_link = upload_and_get_temporary_link(
                         base64.b64decode(captioned_images["text_only"]),
                         f"{req.dropbox_dir}/text_only/text_{i+1:02d}_text.png"
                     )
-                    upload_to_dropbox(
+                    final_combined_link = upload_and_get_temporary_link(
                         base64.b64decode(captioned_images["final_combined"]),
                         f"{req.dropbox_dir}/final_combined/text_{i+1:02d}_combined.png"
                     )
-
-                results.append({
-                    "success": True, 
-                    "text_only": captioned_images["text_only"], 
-                    "final_combined": captioned_images["final_combined"]
-                })
+                    results.append({
+                        "success": True, 
+                        "text_only": text_only_link, 
+                        "final_combined": final_combined_link
+                    })
+                else:
+                    results.append({
+                        "success": True, 
+                        "text_only": captioned_images["text_only"], 
+                        "final_combined": captioned_images["final_combined"]
+                    })
             except Exception as e:
                 logging.error(f"Error processing text '{text_content}': {e}", exc_info=True)
                 results.append({"success": False, "error": str(e)})
         
-        return {
-            "background_only": background_data["background_only_b64"],
-            "images": results
-        }
+        if req.dropbox_dir:
+            background_link = None
+            background_b64 = background_data.get("background_only_b64")
+            if isinstance(background_b64, str):
+                background_link = upload_and_get_temporary_link(
+                    base64.b64decode(background_b64),
+                    f"{req.dropbox_dir}/background.png"
+                )
+            return {
+                "background_only": background_link,
+                "images": results
+            }
+        else:
+            return {
+                "background_only": background_data["background_only_b64"],
+                "images": results
+            }
 
     except requests.exceptions.RequestException as e:
         logging.error(f"Error fetching image: {e}")
