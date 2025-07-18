@@ -77,6 +77,7 @@ class CaptionRequest(BaseModel):
 class VideoGenerationRequest(BaseModel):
     dropbox_folder_path: str
     local_folder_path: Optional[str] = None
+    audio_dropbox_path: Optional[str] = None
     save_to_dropbox: bool = False
     video_duration_per_text: float = 5.0
     fade_duration: float = 0.5
@@ -571,6 +572,7 @@ async def generate_video(req: VideoGenerationRequest, background_tasks: Backgrou
     background_tasks.add_task(
         create_video_with_parameters,
         dropbox_folder_path=req.dropbox_folder_path,
+        audio_dropbox_path=req.audio_dropbox_path,
         local_folder_path=req.local_folder_path,
         save_to_dropbox=req.save_to_dropbox,
         video_duration_per_text=req.video_duration_per_text,

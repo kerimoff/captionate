@@ -11,6 +11,7 @@ URL="http://127.0.0.1:8000/generate-video"
 # and save the final output back to the same Dropbox folder.
 JSON_PAYLOAD='{
   "dropbox_folder_path": "/temp/18_07_2025",
+  "audio_dropbox_path": "/music_background/suspense-in-the-wood-360052.mp3",
   "local_folder_path": null,
   "save_to_dropbox": true,
   "video_duration_per_text": 5.0,
@@ -25,6 +26,8 @@ JSON_PAYLOAD='{
 }'
 
 # Send the POST request using curl
+
+echo $JSON_PAYLOAD
 echo "Sending request to generate video..."
 curl -X POST "$URL" \
      -H "Content-Type: application/json" \

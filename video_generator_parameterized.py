@@ -8,12 +8,14 @@ from typing import Optional
 from dotenv import load_dotenv
 import dropbox
 from dropbox import files
+from dropbox import exceptions
 from moviepy import VideoFileClip, ImageClip, CompositeVideoClip, vfx, ColorClip, AudioFileClip
 
 def create_video_with_parameters(
     dropbox_folder_path: str,
     local_folder_path: Optional[str] = None,
     save_to_dropbox: bool = False,
+    audio_dropbox_path: Optional[str] = "/music_background/lofi-for-tiktok.mp3",
     video_duration_per_text: float = 5.0,
     fade_duration: float = 0.5,
     line_horizontal_margin: int = 20,
@@ -35,6 +37,8 @@ def create_video_with_parameters(
         Optional local folder path as fallback. If None, will download from Dropbox.
     save_to_dropbox : bool, default=False
         If True, uploads the generated video to the `dropbox_folder_path`.
+    audio_dropbox_path : str, default="/music_background/lofi-for-tiktok.mp3"
+        The Dropbox path to the background music file. If None, no music is added.
     video_duration_per_text : float, default=5.0
         Total time each text is displayed (including fade in/out)
     fade_duration : float, default=0.5
@@ -90,6 +94,14 @@ def create_video_with_parameters(
         working_folder = download_from_dropbox(dropbox_folder_path)
         print(f"Downloaded from Dropbox to: {working_folder}")
     
+    # Download audio file from Dropbox if a path is provided
+    audio_path = None
+    if audio_dropbox_path:
+        try:
+            audio_path = download_single_file_from_dropbox(audio_dropbox_path, working_folder)
+        except (FileNotFoundError, RuntimeError) as e:
+            print(f"Warning: Could not download audio file. Video will be silent. Error: {e}")
+
     # File paths
     background_path = os.path.join(working_folder, "background.png")
     text_pattern = os.path.join(working_folder, "text_only", "text_*_text.png")
@@ -202,9 +214,9 @@ def create_video_with_parameters(
                     .with_fps(fps)                           # v2 keeps with_fps
 
     # --- Add external music, trimmed to the clip length ---
-    audio_path = "music/lofi-for-tiktok-369050.mp3"
-    audio_clip = AudioFileClip(audio_path).subclipped(0, final_video.duration)  # trim  [oai_citation:1‡Bastaki Software Solutions L.L.C-FZ](https://bastakiss.com/blog/python-5/exploring-moviepy-2-a-modern-approach-to-video-editing-in-python-618?utm_source=chatgpt.com)
-    final_video = final_video.with_audio(audio_clip)                            # v2 helper  [oai_citation:2‡GeeksforGeeks](https://www.geeksforgeeks.org/python/moviepy-assigning-audio-clip-to-video-file/)
+    if audio_path and os.path.exists(audio_path):
+        audio_clip = AudioFileClip(audio_path).subclipped(0, final_video.duration)
+        final_video = final_video.with_audio(audio_clip)
 
     # --- Export ---
     output_path = "media/videos/moviepy_output.mp4"
@@ -292,6 +304,44 @@ def download_from_dropbox(dropbox_folder_path: str) -> str:
     return local_save_path
 
 
+def download_single_file_from_dropbox(dropbox_file_path: str, local_folder_path: str) -> str:
+    """
+    Download a single file from Dropbox.
+    
+    Parameters:
+    -----------
+    dropbox_file_path : str
+        Dropbox file path to download.
+    local_folder_path : str
+        Local folder path to save the file.
+        
+    Returns:
+    --------
+    str : Local file path of the downloaded file.
+    """
+    access_token = os.getenv('DROPBOX_ACCESS_TOKEN')
+    if not access_token:
+        raise ValueError("DROPBOX_ACCESS_TOKEN not found in .env file.")
+        
+    try:
+        dbx = dropbox.Dropbox(access_token)
+    except Exception as e:
+        raise ConnectionError(f"Failed to connect to Dropbox: {e}")
+
+    file_name = os.path.basename(dropbox_file_path)
+    local_file = os.path.join(local_folder_path, file_name)
+    
+    print(f"Downloading {file_name} from Dropbox path '{dropbox_file_path}'...")
+    try:
+        dbx.files_download_to_file(local_file, dropbox_file_path)
+        print(f"Successfully downloaded to {local_file}")
+        return local_file
+    except exceptions.ApiError as err:
+        if err.error.is_path() and err.error.get_path().is_not_found():
+            raise FileNotFoundError(f"File not found on Dropbox: {dropbox_file_path}") from err
+        raise RuntimeError(f"Error downloading file from Dropbox: {err}") from err
+
+
 def upload_to_dropbox(local_file_path: str, dropbox_upload_path: str):
     """
     Uploads a local file to a specified Dropbox path.
@@ -334,6 +384,7 @@ if __name__ == "__main__":
             dropbox_folder_path="/temp/20_52_07",        # Used for upload path
             # local_folder_path="downloaded_files_new",     # Use existing local files
             save_to_dropbox=True,                       # Set to True to upload result
+            audio_dropbox_path="/music/lofi-for-tiktok.mp3",  # Example Dropbox audio path
             video_duration_per_text=5.0,             # 5 seconds per text
             fade_duration=0.2,                       # 0.5 second fade in/out
             line_horizontal_margin=20,               # 20% total margin (10% each side)
