@@ -6,18 +6,11 @@ from datetime import datetime
 
 # Replace with your actual image URL and texts
 request_payload = {
-    "image_url": "https://images.unsplash.com/photo-1483519173755-be893fab1f46?q=80&w=3608&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D", # Replace with a real image URL
+    "image_url": "https://i.ibb.co/F4bPwd6T/mosquito.jpg", # Replace with a real image URL
     "text": [
-        "The human eye can distinguish over 10 million different colors. But again, let's not test that and test if there are more than 10 million colors in this image.",
-        "Human eyes can detect a single photon of light.",
-        "Your eyes are the same size from birth and never grow.",
-        "Brown eyes are actually blue underneath - melanin makes them appear brown.",
-        "The cornea is the only part of your body with no blood supply.",
-        "Eyes heal incredibly fast - a scratched cornea heals in 24-48 hours.",
         "The eye's lens changes shape <b>100,000 times per day</b> to focus.",
         "The human eye blinks about 17,000 times per day.",
-        "The retina contains <b>120 million rods</b> and <b>6 million cones</b>.",
-        "Your eyes use 25% of your brain's processing power."
+        "The retina contains <b>120 million rods</b> and <b>6 million cones</b>."
     ],
     "font_family": "Montserrat",
     "text_position": "bottom",
