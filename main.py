@@ -12,13 +12,13 @@ from fastapi.exceptions import HTTPException
 import logging
 import re
 import base64
-import dropbox
 import os
 from typing import Optional
 from dotenv import load_dotenv
 from dropbox.files import WriteMode
 from dropbox.exceptions import ApiError
 from video_generator_parameterized import create_video_with_parameters
+from scripts.dropbox_utils import get_dbx_client, upload_and_get_temporary_link as upload_and_get_link
 
 load_dotenv()
 
@@ -91,28 +91,11 @@ class VideoGenerationRequest(BaseModel):
 
 
 def upload_and_get_temporary_link(file_content: bytes, dropbox_path: str) -> Optional[str]:
-    access_token = os.getenv('DROPBOX_ACCESS_TOKEN')
-    if not access_token:
-        logging.error("DROPBOX_ACCESS_TOKEN environment variable not set.")
-        return None
-
     try:
-        dbx = dropbox.Dropbox(access_token)
-        dbx.files_upload(file_content, dropbox_path, mode=WriteMode('overwrite'))
-        logging.info(f"Successfully uploaded to Dropbox: {dropbox_path}")
-        
-        link_result = dbx.files_get_temporary_link(dropbox_path)
-        if link_result:
-            logging.info(f"Successfully created temporary link for: {dropbox_path}")
-            return link_result.link
-        else:
-            logging.error(f"Failed to get temporary link for {dropbox_path}")
-            return None
-    except ApiError as e:
-        logging.error(f"Dropbox API error when processing {dropbox_path}: {e}")
-        return None
+        dbx = get_dbx_client()
+        return upload_and_get_link(dbx, file_content, dropbox_path)
     except Exception as e:
-        logging.error(f"Failed to upload or get temporary link from Dropbox for {dropbox_path}: {e}")
+        logging.error(f"Failed to get Dropbox client or upload: {e}")
         return None
 
 

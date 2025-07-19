@@ -6,10 +6,13 @@ import glob
 import shutil
 from typing import Optional
 from dotenv import load_dotenv
-import dropbox
-from dropbox import files
-from dropbox import exceptions
 from moviepy import VideoFileClip, ImageClip, CompositeVideoClip, vfx, ColorClip, AudioFileClip
+from scripts.dropbox_utils import (
+    get_dbx_client,
+    download_from_dropbox as download_folder,
+    download_single_file_from_dropbox as download_file,
+    upload_to_dropbox as upload_file
+)
 
 def create_video_with_parameters(
     dropbox_folder_path: str,
@@ -90,15 +93,15 @@ def create_video_with_parameters(
         working_folder = local_folder_path
         print(f"Using local folder: {working_folder}")
     else:
-        # Download from Dropbox
-        working_folder = download_from_dropbox(dropbox_folder_path)
+        dbx = get_dbx_client()
+        working_folder = download_folder(dbx, dropbox_folder_path)
         print(f"Downloaded from Dropbox to: {working_folder}")
-    
-    # Download audio file from Dropbox if a path is provided
+
     audio_path = None
     if audio_dropbox_path:
         try:
-            audio_path = download_single_file_from_dropbox(audio_dropbox_path, working_folder)
+            dbx = get_dbx_client()
+            audio_path = download_file(dbx, audio_dropbox_path, working_folder)
         except (FileNotFoundError, RuntimeError) as e:
             print(f"Warning: Could not download audio file. Video will be silent. Error: {e}")
 
@@ -235,165 +238,38 @@ def create_video_with_parameters(
     print(f"Output file: {output_path}")
 
     if save_to_dropbox:
-        # Construct Dropbox upload path, e.g., /temp/20_52_07/moviepy_output.mp4
         dropbox_upload_path = f"{dropbox_folder_path.rstrip('/')}/{os.path.basename(output_path)}"
         try:
             print(f"Uploading to Dropbox: {dropbox_upload_path}")
-            upload_to_dropbox(output_path, dropbox_upload_path)
+            dbx = get_dbx_client()
+            upload_file(dbx, output_path, dropbox_upload_path)
         except Exception as e:
             print(f"Error uploading to Dropbox: {e}")
             
     local_save_path = './downloaded_files'
-    # remove the local save path
-    shutil.rmtree(local_save_path)
+    if os.path.exists(local_save_path):
+        shutil.rmtree(local_save_path)
 
     
     return output_path
 
 
-def download_from_dropbox(dropbox_folder_path: str) -> str:
-    """
-    Download files from Dropbox using token from .env file.
-    
-    Parameters:
-    -----------
-    dropbox_folder_path : str
-        Dropbox folder path to download from
-        
-    Returns:
-    --------
-    str : Local folder path where files were downloaded
-    """
-    # Get Dropbox token from environment
-    access_token = os.getenv('DROPBOX_ACCESS_TOKEN')
-    if not access_token:
-        raise ValueError("DROPBOX_ACCESS_TOKEN not found in .env file. Please add it to your .env file.")
-    
-    # Local folder to save files
-    local_save_path = './downloaded_files'
-    os.makedirs(local_save_path, exist_ok=True)
-    
-    # Initialize Dropbox client
-    try:
-        dbx = dropbox.Dropbox(access_token)
-        print(f"Connected to Dropbox, downloading from: {dropbox_folder_path}")
-    except Exception as e:
-        raise ConnectionError(f"Failed to connect to Dropbox: {e}")
-    
-    # Download folder recursively
-    def download_folder_recursive(dropbox_path: str, local_path: str):
-        try:
-            entries = dbx.files_list_folder(dropbox_path).entries
-            for entry in entries:
-                if isinstance(entry, files.FileMetadata):
-                    file_path = entry.path_lower
-                    file_name = os.path.basename(file_path)
-                    local_file = os.path.join(local_path, file_name)
-                    print(f"Downloading {file_name}...")
-                    with open(local_file, "wb") as f:
-                        metadata, res = dbx.files_download(path=file_path)
-                        f.write(res.content)
-                elif isinstance(entry, files.FolderMetadata):
-                    subfolder = os.path.join(local_path, entry.name)
-                    os.makedirs(subfolder, exist_ok=True)
-                    download_folder_recursive(entry.path_lower, subfolder)
-        except Exception as e:
-            raise RuntimeError(f"Error downloading from Dropbox: {e}")
-    
-    download_folder_recursive(dropbox_folder_path, local_save_path)
-    return local_save_path
-
-
-def download_single_file_from_dropbox(dropbox_file_path: str, local_folder_path: str) -> str:
-    """
-    Download a single file from Dropbox.
-    
-    Parameters:
-    -----------
-    dropbox_file_path : str
-        Dropbox file path to download.
-    local_folder_path : str
-        Local folder path to save the file.
-        
-    Returns:
-    --------
-    str : Local file path of the downloaded file.
-    """
-    access_token = os.getenv('DROPBOX_ACCESS_TOKEN')
-    if not access_token:
-        raise ValueError("DROPBOX_ACCESS_TOKEN not found in .env file.")
-        
-    try:
-        dbx = dropbox.Dropbox(access_token)
-    except Exception as e:
-        raise ConnectionError(f"Failed to connect to Dropbox: {e}")
-
-    file_name = os.path.basename(dropbox_file_path)
-    local_file = os.path.join(local_folder_path, file_name)
-    
-    print(f"Downloading {file_name} from Dropbox path '{dropbox_file_path}'...")
-    try:
-        dbx.files_download_to_file(local_file, dropbox_file_path)
-        print(f"Successfully downloaded to {local_file}")
-        return local_file
-    except exceptions.ApiError as err:
-        if err.error.is_path() and err.error.get_path().is_not_found():
-            raise FileNotFoundError(f"File not found on Dropbox: {dropbox_file_path}") from err
-        raise RuntimeError(f"Error downloading file from Dropbox: {err}") from err
-
-
-def upload_to_dropbox(local_file_path: str, dropbox_upload_path: str):
-    """
-    Uploads a local file to a specified Dropbox path.
-    
-    Parameters:
-    -----------
-    local_file_path : str
-        The path to the local file to upload.
-    dropbox_upload_path : str
-        The destination path in Dropbox (e.g., "/Apps/CaptiOnAte/my_video.mp4").
-    """
-    access_token = os.getenv('DROPBOX_ACCESS_TOKEN')
-    if not access_token:
-        raise ValueError("DROPBOX_ACCESS_TOKEN not found in .env file. Please add it to your .env file.")
-    
-    try:
-        dbx = dropbox.Dropbox(access_token)
-        print(f"Connected to Dropbox, attempting to upload to: {dropbox_upload_path}")
-    except Exception as e:
-        raise ConnectionError(f"Failed to connect to Dropbox: {e}")
-    
-    with open(local_file_path, "rb") as f:
-        try:
-            # Use overwrite mode to avoid errors if file exists
-            dbx.files_upload(
-                f.read(),
-                dropbox_upload_path,
-                mode=files.WriteMode('overwrite')
-            )
-            print(f"Successfully uploaded {local_file_path} to {dropbox_upload_path}")
-        except Exception as e:
-            raise RuntimeError(f"Error during Dropbox upload: {e}")
-
-
 # Example usage and testing
 if __name__ == "__main__":
     try:
-        # Example with default parameters
         output_file = create_video_with_parameters(
-            dropbox_folder_path="/temp/20_52_07",        # Used for upload path
-            # local_folder_path="downloaded_files_new",     # Use existing local files
-            save_to_dropbox=True,                       # Set to True to upload result
-            audio_dropbox_path="/music/lofi-for-tiktok.mp3",  # Example Dropbox audio path
-            video_duration_per_text=5.0,             # 5 seconds per text
-            fade_duration=0.2,                       # 0.5 second fade in/out
-            line_horizontal_margin=20,               # 20% total margin (10% each side)
-            line_bottom_margin=70,                   # 20% from bottom
-            line_thickness=5,                        # 3 pixel thick line
-            line_color="#FFFF00",                    # Yellow line
-            fps=30,                                  # 30 fps for good quality
-            codec='libx264',                         # H.264 codec
-            line_segments_per_second=60           
+            dropbox_folder_path="/temp/20_52_07",
+            save_to_dropbox=True,
+            audio_dropbox_path="/music/lofi-for-tiktok.mp3",
+            video_duration_per_text=5.0,
+            fade_duration=0.2,
+            line_horizontal_margin=20,
+            line_bottom_margin=70,
+            line_thickness=5,
+            line_color="#FFFF00",
+            fps=30,
+            codec='libx264',
+            line_segments_per_second=60
         )
         print(f"Successfully created video: {output_file}")
         
