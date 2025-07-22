@@ -305,8 +305,8 @@ def _generate_text_and_combined_image_from_background(
     margin_top_px = int((margin_top / 100) * bg_height)
     margin_bottom_px = int((margin_bottom / 100) * bg_height)
 
-    text_only_overlay = Image.new("RGBA", (width, bg_height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(text_only_overlay)
+    text_on_bg_overlay = Image.new("RGBA", (width, bg_height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(text_on_bg_overlay)
     
     logical_lines_styled = parse_html_text(text_content)
 
@@ -431,13 +431,21 @@ def _generate_text_and_combined_image_from_background(
             
             current_y += line_actual_height
     
+    text_only_full_image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    if text_position == "bottom":
+        text_paste_position = (0, height - bg_height)
+    else:
+        text_paste_position = (0, 0)
+    
+    text_only_full_image.paste(text_on_bg_overlay, text_paste_position)
+
     text_output_buffer = io.BytesIO()
-    text_only_overlay.save(text_output_buffer, format="PNG")
+    text_only_full_image.save(text_output_buffer, format="PNG")
     text_output_buffer.seek(0)
     text_only_b64 = base64.b64encode(text_output_buffer.getvalue()).decode('utf-8')
 
     final_overlay_with_text = overlay_image.copy()
-    final_overlay_with_text.alpha_composite(text_only_overlay, (0, 0))
+    final_overlay_with_text.alpha_composite(text_on_bg_overlay, (0, 0))
 
     final_combined_img = img.copy()
     if text_position == "bottom":
