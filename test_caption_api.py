@@ -6,20 +6,20 @@ from datetime import datetime
 
 # Replace with your actual image URL and texts
 request_payload = {
-    "image_url": "https://i.ibb.co/F4bPwd6T/mosquito.jpg", # Replace with a real image URL
-    "dropbox_dir": "/temp/18_07_2025",
+    "image_url": "https://www.dropbox.com/scl/fi/nwx011djhfzr51o56rj8x/octopus.jpg?rlkey=ko3jny2dfocjm12uvv3ylusue&st=oo3rji18&dl=1", # Replace with a real image URL
+    "dropbox_dir": "/temp_res",
     "text": [
-        "The eye's lens changes shape <b>100,000 times per day</b> to focus.",
-        "The human eye blinks about 17,000 times per day.",
-        "The retina contains <b>120 million rods</b> and <b>6 million cones</b>."
+        "Octopuses have <b>three hearts</b> that pump blue blood through their bodies.",
+        "An octopus can squeeze through any opening <b>larger than its beak</b>.",
+        "Each octopus arm has <b>its own brain</b> and can taste what it touches."
     ],
     "font_family": "Montserrat",
     "text_position": "bottom",
-    "background_height": 1,
-    "background_color": "rgba(0, 0, 0, 150)",
-    "margin_horizontal": 5,
-    "margin_top": 40,
-    "margin_bottom": 40,
+    "background_height": 0.9,
+    "background_color": "rgba(0, 0, 0, 200)",
+    "margin_horizontal": 24,
+    "margin_top": 30,
+    "margin_bottom": 50,
     "transition_proportion": 0.2
 }
 
