@@ -3,6 +3,7 @@ import json
 import base64
 import os
 from datetime import datetime
+import time
 
 # Replace with your actual image URL and texts
 request_payload = {
@@ -30,6 +31,7 @@ output_dir = os.path.join("results", current_date, current_time)
 os.makedirs(output_dir, exist_ok=True)
 print(f"Saving results to: {output_dir}")
 
+start_time = time.time()
 try:
     response = requests.post("http://127.0.0.1:8000/caption-image", json=request_payload)
     response.raise_for_status() # Raise an exception for HTTP errors (4xx or 5xx)
@@ -98,3 +100,7 @@ except json.JSONDecodeError:
 except Exception as e:
     print(f"An unexpected error occurred: {e}")
     print(f"Response content: {response.text if 'response' in locals() else 'No response received'}")
+
+end_time = time.time()
+duration = end_time - start_time
+print(f"This run took {duration:.2f} seconds")

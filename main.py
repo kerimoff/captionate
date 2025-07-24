@@ -13,6 +13,8 @@ import logging
 import re
 import base64
 import os
+import asyncio
+from concurrent.futures import ProcessPoolExecutor
 from typing import Optional
 from dotenv import load_dotenv
 from dropbox.files import WriteMode
@@ -465,12 +467,67 @@ def _generate_text_and_combined_image_from_background(
     }
     return result
 
+
+def _process_text_and_upload(
+    original_img_bytes: bytes,
+    overlay_image_bytes: bytes,
+    text_content: str,
+    font_family: Literal["Montserrat", "Nunito", "Poppins", "Roboto"],
+    text_position: Literal["top", "bottom"],
+    background_height: float,
+    margin_horizontal: int,
+    margin_top: int,
+    margin_bottom: int,
+    dropbox_dir: Optional[str],
+    text_index: int,
+) -> dict:
+    try:
+        original_img = Image.open(io.BytesIO(original_img_bytes))
+        overlay_image = Image.open(io.BytesIO(overlay_image_bytes))
+
+        captioned_images = _generate_text_and_combined_image_from_background(
+            original_img=original_img,
+            overlay_image=overlay_image,
+            text_content=text_content,
+            font_family=font_family,
+            text_position=text_position,
+            background_height=background_height,
+            margin_horizontal=margin_horizontal,
+            margin_top=margin_top,
+            margin_bottom=margin_bottom,
+        )
+
+        if dropbox_dir:
+            text_only_link = upload_and_get_temporary_link(
+                base64.b64decode(captioned_images["text_only"]),
+                f"{dropbox_dir}/text_only/text_{text_index+1:02d}_text.png"
+            )
+            final_combined_link = upload_and_get_temporary_link(
+                base64.b64decode(captioned_images["final_combined"]),
+                f"{dropbox_dir}/final_combined/text_{text_index+1:02d}_combined.png"
+            )
+            return {
+                "success": True, 
+                "text_only": text_only_link, 
+                "final_combined": final_combined_link
+            }
+        else:
+            return {
+                "success": True, 
+                "text_only": captioned_images["text_only"], 
+                "final_combined": captioned_images["final_combined"]
+            }
+    except Exception as e:
+        logging.error(f"Error processing text '{text_content}': {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
 @app.get("/test")
 def test_endpoint():
     return {"message": "Server is running updated code with three image outputs", "timestamp": "2025-07-17"}
 
 @app.post("/caption-image")
-def caption_image(req: CaptionRequest):
+async def caption_image(req: CaptionRequest):
     try:
         logging.info(f"Received request: {req}")
 
@@ -493,44 +550,36 @@ def caption_image(req: CaptionRequest):
         if not isinstance(overlay_image, Image.Image):
             raise TypeError("Generated overlay is not a valid PIL Image")
 
-        results = []
-        for i, text_content in enumerate(req.texts):
-            try:
-                captioned_images = _generate_text_and_combined_image_from_background(
-                    original_img=original_img,
-                    overlay_image=overlay_image,
-                    text_content=text_content,
-                    font_family=req.font_family,
-                    text_position=req.text_position,
-                    background_height=req.background_height,
-                    margin_horizontal=req.margin_horizontal,
-                    margin_top=req.margin_top,
-                    margin_bottom=req.margin_bottom,
-                )
+        original_img_buffer = io.BytesIO()
+        original_img.save(original_img_buffer, format="PNG")
+        original_img_bytes = original_img_buffer.getvalue()
 
-                if req.dropbox_dir:
-                    text_only_link = upload_and_get_temporary_link(
-                        base64.b64decode(captioned_images["text_only"]),
-                        f"{req.dropbox_dir}/text_only/text_{i+1:02d}_text.png"
-                    )
-                    final_combined_link = upload_and_get_temporary_link(
-                        base64.b64decode(captioned_images["final_combined"]),
-                        f"{req.dropbox_dir}/final_combined/text_{i+1:02d}_combined.png"
-                    )
-                    results.append({
-                        "success": True, 
-                        "text_only": text_only_link, 
-                        "final_combined": final_combined_link
-                    })
-                else:
-                    results.append({
-                        "success": True, 
-                        "text_only": captioned_images["text_only"], 
-                        "final_combined": captioned_images["final_combined"]
-                    })
-            except Exception as e:
-                logging.error(f"Error processing text '{text_content}': {e}", exc_info=True)
-                results.append({"success": False, "error": str(e)})
+        overlay_image_buffer = io.BytesIO()
+        overlay_image.save(overlay_image_buffer, format="PNG")
+        overlay_image_bytes = overlay_image_buffer.getvalue()
+
+        loop = asyncio.get_running_loop()
+        with ProcessPoolExecutor() as pool:
+            tasks = []
+            for i, text_content in enumerate(req.texts):
+                task = loop.run_in_executor(
+                    pool,
+                    _process_text_and_upload,
+                    original_img_bytes,
+                    overlay_image_bytes,
+                    text_content,
+                    req.font_family,
+                    req.text_position,
+                    req.background_height,
+                    req.margin_horizontal,
+                    req.margin_top,
+                    req.margin_bottom,
+                    req.dropbox_dir,
+                    i,
+                )
+                tasks.append(task)
+            
+            results = await asyncio.gather(*tasks)
         
         if req.dropbox_dir:
             background_link = None
