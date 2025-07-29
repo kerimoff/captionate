@@ -14,6 +14,7 @@ import re
 import base64
 import os
 import asyncio
+import sys
 from concurrent.futures import ProcessPoolExecutor
 from typing import Optional
 from dotenv import load_dotenv
@@ -26,7 +27,27 @@ load_dotenv()
 
 app = FastAPI()
 
-logging.basicConfig(level=logging.INFO)
+# Configure logging to separate INFO and WARNING+ streams
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+# Clear any existing handlers to avoid duplicates
+if logger.hasHandlers():
+    logger.handlers.clear()
+
+# Handler for INFO and below to stdout
+stdout_handler = logging.StreamHandler(sys.stdout)
+stdout_handler.setLevel(logging.INFO)
+stdout_handler.addFilter(lambda record: record.levelno < logging.WARNING)
+stdout_handler.setFormatter(logging.Formatter('%(levelname)s:%(name)s:%(message)s'))
+logger.addHandler(stdout_handler)
+
+# Handler for WARNING and above to stderr
+stderr_handler = logging.StreamHandler(sys.stderr)
+stderr_handler.setLevel(logging.WARNING)
+stderr_handler.setFormatter(logging.Formatter('%(levelname)s:%(name)s:%(message)s'))
+logger.addHandler(stderr_handler)
+
 logging.getLogger("PIL").setLevel(logging.WARNING)
 
 GOOGLE_FONTS_BASE_DIR = "google-fonts"
