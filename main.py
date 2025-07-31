@@ -148,6 +148,10 @@ class VideoGenerationRequest(BaseModel):
     line_thickness: int = 3
     line_color: str = "#FFFF00"
     fps: int = 30
+    gif_width_proportion: float = Field(default=0.8, ge=0.1, le=1.0)
+    gif_offset_proportion: float = Field(default=0.1, ge=0.0, le=1.0)
+    gif_duration: float = Field(default=2.0, ge=0.1)
+    gif_framerate: int = Field(default=50, ge=1)
 
 
 def get_font_for_style(font_family_name: str, base_size: int,
@@ -730,6 +734,10 @@ def generate_video_from_script(
     line_thickness: int,
     line_color: str,
     fps: int,
+    gif_width_proportion: float,
+    gif_offset_proportion: float,
+    gif_duration: float,
+    gif_framerate: int,
 ):
     """
     Generates a video using the create_vid.sh script.
@@ -757,6 +765,15 @@ def generate_video_from_script(
                 f"Downloading background from {dropbox_bg_path} to {local_background_path}"
             )
             dbx.files_download_to_file(local_background_path, dropbox_bg_path)
+            
+            # Get image dimensions to calculate proportional values
+            from PIL import Image
+            with Image.open(local_background_path) as img:
+                img_width, img_height = img.size
+            
+            # Calculate proportional values
+            gif_width = int(img_width * gif_width_proportion)
+            gif_y_offset = int(img_height * gif_offset_proportion)
 
             # Download text images
             dropbox_text_path = f"{dropbox_folder_path.rstrip('/')}/text_only"
@@ -796,13 +813,17 @@ def generate_video_from_script(
                 "--fade-duration",
                 str(fade_duration),
                 "--gif-y-offset",
-                str(line_bottom_margin),
+                str(gif_y_offset),
+                "--gif-width",
+                str(gif_width),
                 "--gif-height",
                 str(line_thickness),
                 "--gif-color",
                 line_color,
+                "--gif-duration",
+                str(gif_duration),
                 "--gif-framerate",
-                str(fps),
+                str(gif_framerate),
             ]
             if local_music_path:
                 cmd.extend(["--music", local_music_path])
@@ -847,6 +868,10 @@ def generate_video(req: VideoGenerationRequest):
             line_thickness=req.line_thickness,
             line_color=req.line_color,
             fps=req.fps,
+            gif_width_proportion=req.gif_width_proportion,
+            gif_offset_proportion=req.gif_offset_proportion,
+            gif_duration=req.gif_duration,
+            gif_framerate=req.gif_framerate,
         )
 
         end_time = time.time()  # End timing
