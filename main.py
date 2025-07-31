@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Query, BackgroundTasks
+from fastapi import FastAPI, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Literal, Set, List, Union, Optional
@@ -730,28 +730,32 @@ def generate_video_from_script(
 
 
 @app.post("/generate-video")
-async def generate_video(req: VideoGenerationRequest, background_tasks: BackgroundTasks):
-    background_tasks.add_task(
-        generate_video_from_script,
-        dropbox_folder_path=req.dropbox_folder_path,
-        audio_dropbox_path=req.audio_dropbox_path,
-        save_to_dropbox=req.save_to_dropbox,
-        video_duration_per_text=req.video_duration_per_text,
-        fade_duration=req.fade_duration,
-        line_bottom_margin=req.line_bottom_margin,
-        line_thickness=req.line_thickness,
-        line_color=req.line_color,
-        fps=req.fps,
-    )
+def generate_video(req: VideoGenerationRequest):
+    try:
+        generate_video_from_script(
+            dropbox_folder_path=req.dropbox_folder_path,
+            audio_dropbox_path=req.audio_dropbox_path,
+            save_to_dropbox=req.save_to_dropbox,
+            video_duration_per_text=req.video_duration_per_text,
+            fade_duration=req.fade_duration,
+            line_bottom_margin=req.line_bottom_margin,
+            line_thickness=req.line_thickness,
+            line_color=req.line_color,
+            fps=req.fps,
+        )
 
-    response_data = {
-        "message": "Video generation with script started in the background."
-    }
+        response_data = {
+            "message": "Video generation completed successfully."
+        }
 
-    if req.save_to_dropbox:
-        video_name = "generated_video.mp4"
-        response_data["dropbox_video_path"] = f"{req.dropbox_folder_path.rstrip('/')}/{video_name}"
-    else:
-        response_data["local_video_path"] = "Local path not available when not saving to Dropbox."
+        if req.save_to_dropbox:
+            video_name = "generated_video.mp4"
+            response_data["dropbox_video_path"] = f"{req.dropbox_folder_path.rstrip('/')}/{video_name}"
+        else:
+            response_data["message"] = "Video generation completed. File saved locally but not uploaded to Dropbox."
 
-    return response_data
+        return response_data
+    
+    except Exception as e:
+        logging.error(f"Error in video generation: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Video generation failed: {str(e)}")
