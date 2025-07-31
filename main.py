@@ -22,10 +22,25 @@ from dropbox.files import WriteMode
 from dropbox.exceptions import ApiError
 from video_generator_parameterized import create_video_with_parameters
 from scripts.dropbox_utils import get_dbx_client, upload_and_get_temporary_link as upload_and_get_link
+import dropbox
 
 load_dotenv()
 
 app = FastAPI()
+
+# Per-process cache for the Dropbox client
+_dbx_client_cache: Optional[dropbox.Dropbox] = None
+
+def get_dbx_client_cached() -> dropbox.Dropbox:
+    """
+    Returns a cached Dropbox client for the current process, creating one if it doesn't exist.
+    """
+    global _dbx_client_cache
+    if _dbx_client_cache is None:
+        logging.info(f"Process {os.getpid()}: Initializing new Dropbox client.")
+        _dbx_client_cache = get_dbx_client()
+    return _dbx_client_cache
+
 
 # Configure logging to separate INFO and WARNING+ streams
 logger = logging.getLogger()
@@ -111,15 +126,6 @@ class VideoGenerationRequest(BaseModel):
     fps: int = 30
     codec: str = 'libx264'
     line_segments_per_second: int = 30
-
-
-def upload_and_get_temporary_link(file_content: bytes, dropbox_path: str) -> Optional[str]:
-    try:
-        dbx = get_dbx_client()
-        return upload_and_get_link(dbx, file_content, dropbox_path)
-    except Exception as e:
-        logging.error(f"Failed to get Dropbox client or upload: {e}")
-        return None
 
 
 def get_font_for_style(font_family_name: str, base_size: int, styles: Set[str]) -> ImageFont.FreeTypeFont:
@@ -519,11 +525,14 @@ def _process_text_and_upload(
         )
 
         if dropbox_dir:
-            text_only_link = upload_and_get_temporary_link(
+            dbx = get_dbx_client_cached()
+            text_only_link = upload_and_get_link(
+                dbx,
                 base64.b64decode(captioned_images["text_only"]),
                 f"{dropbox_dir}/text_only/text_{text_index+1:02d}_text.png"
             )
-            final_combined_link = upload_and_get_temporary_link(
+            final_combined_link = upload_and_get_link(
+                dbx,
                 base64.b64decode(captioned_images["final_combined"]),
                 f"{dropbox_dir}/final_combined/text_{text_index+1:02d}_combined.png"
             )
@@ -606,7 +615,9 @@ async def caption_image(req: CaptionRequest):
             background_link = None
             background_b64 = background_data.get("background_only_b64")
             if isinstance(background_b64, str):
-                background_link = upload_and_get_temporary_link(
+                dbx = get_dbx_client_cached()
+                background_link = upload_and_get_link(
+                    dbx,
                     base64.b64decode(background_b64),
                     f"{req.dropbox_dir}/background.png"
                 )
