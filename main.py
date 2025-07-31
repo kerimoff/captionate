@@ -142,16 +142,15 @@ class VideoGenerationRequest(BaseModel):
     dropbox_folder_path: str
     audio_dropbox_path: Optional[str] = None
     save_to_dropbox: bool = False
-    video_duration_per_text: float = 5.0
-    fade_duration: float = 0.5
-    line_bottom_margin: int = 20
-    line_thickness: int = 3
+    video_duration_per_text: float = 2.0
+    fade_duration: float = 0.2
+    line_thickness: int = 5
     line_color: str = "#FFFF00"
-    fps: int = 30
+    fps: int = 60
     gif_width_proportion: float = Field(default=0.8, ge=0.1, le=1.0)
-    gif_offset_proportion: float = Field(default=0.1, ge=0.0, le=1.0)
+    gif_offset_proportion: float = Field(default=0.2, ge=0.0, le=1.0)
     gif_duration: float = Field(default=2.0, ge=0.1)
-    gif_framerate: int = Field(default=50, ge=1)
+    gif_framerate: int = Field(default=60, ge=1)
 
 
 def get_font_for_style(font_family_name: str, base_size: int,
@@ -730,7 +729,6 @@ def generate_video_from_script(
     save_to_dropbox: bool,
     video_duration_per_text: float,
     fade_duration: float,
-    line_bottom_margin: int,
     line_thickness: int,
     line_color: str,
     fps: int,
@@ -765,12 +763,12 @@ def generate_video_from_script(
                 f"Downloading background from {dropbox_bg_path} to {local_background_path}"
             )
             dbx.files_download_to_file(local_background_path, dropbox_bg_path)
-            
+
             # Get image dimensions to calculate proportional values
             from PIL import Image
             with Image.open(local_background_path) as img:
                 img_width, img_height = img.size
-            
+
             # Calculate proportional values
             gif_width = int(img_width * gif_width_proportion)
             gif_y_offset = int(img_height * gif_offset_proportion)
@@ -864,7 +862,6 @@ def generate_video(req: VideoGenerationRequest):
             save_to_dropbox=req.save_to_dropbox,
             video_duration_per_text=req.video_duration_per_text,
             fade_duration=req.fade_duration,
-            line_bottom_margin=req.line_bottom_margin,
             line_thickness=req.line_thickness,
             line_color=req.line_color,
             fps=req.fps,
