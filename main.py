@@ -1,24 +1,71 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from typing import Literal, Set # Added Set
+from typing import Literal, Set, List, Union, Optional
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 import requests
 import io
-import html # Retained for potential unescape, though BeautifulSoup handles most
-from bs4 import BeautifulSoup, NavigableString # Added NavigableString
+import html
+from bs4 import BeautifulSoup
+from bs4.element import NavigableString
 from fastapi.exceptions import HTTPException
 import logging
-import re # Imported for regex operations in text processing
+import re
+import base64
+import os
+import asyncio
+import sys
+import tempfile
+import subprocess
+from concurrent.futures import ProcessPoolExecutor
+from typing import Optional
+from dotenv import load_dotenv
+from dropbox.files import WriteMode
+from dropbox.exceptions import ApiError
+from scripts.dropbox_utils import get_dbx_client, upload_to_dropbox, upload_and_get_temporary_link as upload_and_get_link
+import dropbox
+
+load_dotenv()
 
 app = FastAPI()
 
-# Configure logging
-logging.basicConfig(level=logging.INFO) # Changed to INFO for more verbose logging during dev/debug
-logging.getLogger("PIL").setLevel(logging.WARNING) # Quieten PIL's own INFO logs if any
+# Per-process cache for the Dropbox client
+_dbx_client_cache: Optional[dropbox.Dropbox] = None
 
-# --- Font Paths Configuration ---
-# Base directory for Google Fonts
+def get_dbx_client_cached() -> dropbox.Dropbox:
+    """
+    Returns a cached Dropbox client for the current process, creating one if it doesn't exist.
+    """
+    global _dbx_client_cache
+    if _dbx_client_cache is None:
+        logging.info(f"Process {os.getpid()}: Initializing new Dropbox client.")
+        _dbx_client_cache = get_dbx_client()
+    return _dbx_client_cache
+
+
+# Configure logging to separate INFO and WARNING+ streams
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+# Clear any existing handlers to avoid duplicates
+if logger.hasHandlers():
+    logger.handlers.clear()
+
+# Handler for INFO and below to stdout
+stdout_handler = logging.StreamHandler(sys.stdout)
+stdout_handler.setLevel(logging.INFO)
+stdout_handler.addFilter(lambda record: record.levelno < logging.WARNING)
+stdout_handler.setFormatter(logging.Formatter('%(levelname)s:%(name)s:%(message)s'))
+logger.addHandler(stdout_handler)
+
+# Handler for WARNING and above to stderr
+stderr_handler = logging.StreamHandler(sys.stderr)
+stderr_handler.setLevel(logging.WARNING)
+stderr_handler.setFormatter(logging.Formatter('%(levelname)s:%(name)s:%(message)s'))
+logger.addHandler(stderr_handler)
+
+logging.getLogger("PIL").setLevel(logging.WARNING)
+
 GOOGLE_FONTS_BASE_DIR = "google-fonts"
 
 FONT_FAMILY_PATHS = {
@@ -35,7 +82,7 @@ FONT_FAMILY_PATHS = {
         "BoldItalic": f"{GOOGLE_FONTS_BASE_DIR}/Nunito/static/Nunito-BoldItalic.ttf",
     },
     "Poppins": {
-        "Regular": f"{GOOGLE_FONTS_BASE_DIR}/Poppins/Poppins-Regular.ttf", # Poppins static is not in a sub-static dir
+        "Regular": f"{GOOGLE_FONTS_BASE_DIR}/Poppins/Poppins-Regular.ttf",
         "Bold": f"{GOOGLE_FONTS_BASE_DIR}/Poppins/Poppins-Bold.ttf",
         "Italic": f"{GOOGLE_FONTS_BASE_DIR}/Poppins/Poppins-Italic.ttf",
         "BoldItalic": f"{GOOGLE_FONTS_BASE_DIR}/Poppins/Poppins-BoldItalic.ttf",
@@ -54,7 +101,7 @@ DEFAULT_FALLBACK_STYLE_PATH = FONT_FAMILY_PATHS[DEFAULT_FALLBACK_FONT_FAMILY]["R
 
 class CaptionRequest(BaseModel):
     image_url: str
-    text: str = Field(default="", description="Text to render. Supports <b>, <i>, <u>, and <br> tags for formatting.")
+    texts: List[str] = Field(default=[""], alias="text", description="List of texts to render. Supports <b>, <i>, <u>, and <br> tags for formatting.")
     font_family: Literal["Montserrat", "Nunito", "Poppins", "Roboto"] = Field(default="Montserrat", description="Font family to use for the text.")
     text_position: Literal["top", "bottom"] = "bottom"
     background_height: float = Field(default=0.4, ge=0.0, le=1.0)
@@ -63,6 +110,19 @@ class CaptionRequest(BaseModel):
     margin_top: int = Field(default=10, ge=0)
     margin_bottom: int = Field(default=10, ge=0)
     transition_proportion: float = Field(default=0.2, ge=0.0, le=1.0)
+    dropbox_dir: Optional[str] = None
+
+
+class VideoGenerationRequest(BaseModel):
+    dropbox_folder_path: str
+    audio_dropbox_path: Optional[str] = None
+    save_to_dropbox: bool = False
+    video_duration_per_text: float = 5.0
+    fade_duration: float = 0.5
+    line_bottom_margin: int = 20
+    line_thickness: int = 3
+    line_color: str = "#FFFF00"
+    fps: int = 30
 
 
 def get_font_for_style(font_family_name: str, base_size: int, styles: Set[str]) -> ImageFont.FreeTypeFont:
@@ -79,14 +139,13 @@ def get_font_for_style(font_family_name: str, base_size: int, styles: Set[str]) 
     elif is_italic:
         font_path = family_map.get("Italic")
     
-    if not font_path: # Default to Regular if specific style not found or not requested
+    if not font_path:
         font_path = family_map.get("Regular", DEFAULT_FALLBACK_STYLE_PATH)
 
     try:
         return ImageFont.truetype(font_path, base_size)
     except IOError as e:
         logging.warning(f"Failed to load font {font_path} for family {font_family_name} at size {base_size}: {e}. Attempting fallbacks.")
-        # Fallback 1: Regular style of the requested family
         if font_path != family_map.get("Regular"):
             try:
                 regular_path = family_map.get("Regular", DEFAULT_FALLBACK_STYLE_PATH)
@@ -95,7 +154,6 @@ def get_font_for_style(font_family_name: str, base_size: int, styles: Set[str]) 
             except IOError as e_reg:
                 logging.warning(f"Failed to load regular style {family_map.get('Regular')} for {font_family_name}: {e_reg}")
         
-        # Fallback 2: Default fallback font (e.g., Montserrat Regular)
         if font_path != DEFAULT_FALLBACK_STYLE_PATH and family_map.get("Regular") != DEFAULT_FALLBACK_STYLE_PATH:
             try:
                 logging.info(f"Falling back to default application font: {DEFAULT_FALLBACK_STYLE_PATH}.")
@@ -103,19 +161,18 @@ def get_font_for_style(font_family_name: str, base_size: int, styles: Set[str]) 
             except IOError as e_default_fallback:
                 logging.error(f"Default fallback font {DEFAULT_FALLBACK_STYLE_PATH} also failed: {e_default_fallback}")
 
-        # Last resort: Pillow's built-in default font
-        logging.error("All font fallbacks failed. Using Pillow's load_default().")
-        return ImageFont.load_default() 
+        # Last resort: try to create a basic font
+        try:
+            return ImageFont.truetype("arial.ttf", base_size)
+        except IOError:
+            try:
+                return ImageFont.truetype("/System/Library/Fonts/Arial.ttf", base_size)
+            except IOError:
+                logging.error("All font fallbacks failed including system fonts.")
+                raise Exception("Unable to load any font")
 
 
 def parse_html_text(html_text: str) -> list[list[tuple[str, Set[str]]]]:
-    """
-    Parses HTML-like text into a list of logical lines.
-    Each logical line is a list of (text_segment, styles_set) tuples.
-    Supported styles: 'bold', 'italic', 'underline'.
-    Supported tags: <b>, <i>, <u>, <br>.
-    """
-    # Unescape HTML entities first
     text_to_parse = html.unescape(html_text)
     soup = BeautifulSoup(text_to_parse, "html.parser")
     
@@ -126,13 +183,9 @@ def parse_html_text(html_text: str) -> list[list[tuple[str, Set[str]]]]:
         nonlocal logical_lines, active_styles
         if isinstance(node, NavigableString):
             content = str(node)
-            # Preserve spaces, but maybe not leading/trailing on a line start/end unless intended
-            # For now, keep all content as is from BS.
-            if content: # Add if there's any content, even just spaces
+            if content:
                 logical_lines[-1].append((content, active_styles.copy()))
         elif node.name == 'br':
-            # Add a new line only if current line has content or if it's not the first line and we want to preserve multiple <br>
-            # A <br> always means a new line, even if the current one is empty.
             logical_lines.append([])
         elif node.name in ['b', 'i', 'u']:
             style_map = {'b': 'bold', 'i': 'italic', 'u': 'underline'}
@@ -145,36 +198,24 @@ def parse_html_text(html_text: str) -> list[list[tuple[str, Set[str]]]]:
             for child in node.children:
                 process_node(child)
             
-            if not original_style_present: # Remove style only if this node instance was the one to add it
+            if not original_style_present:
                 active_styles.remove(style)
-        elif node.name and node.name not in ['html', 'body']: # Process children of other known/container tags
+        elif node.name and node.name not in ['html', 'body']:
             for child in node.children:
                 process_node(child)
-        # Silently ignore unknown tags or specific tags like 'html', 'body'
 
-    # Process all top-level children of the parsed soup
     for child_node in soup.children:
         process_node(child_node)
 
-    # Clean up: remove any trailing empty line if it was added unnecessarily
-    # and the line before it was also empty (e.g. from multiple <br><br> at the end)
-    # However, if the user explicitly puts <br> at the end, they might want a blank line.
-    # For now, only remove the very last line if it's empty AND it's not the only line.
     if len(logical_lines) > 1 and not logical_lines[-1]:
          logical_lines.pop()
-    # If the input was empty or only whitespace, result might be [[]] or [[('', set())]]. Normalize to [[]] for empty.
     if not any(seg[0].strip() for line in logical_lines for seg in line):
-        return [[]] # Represents no renderable text
+        return [[]]
 
     return logical_lines
 
 def rgba_from_string(rgba_str: str) -> tuple[int, int, int, int]:
-    """
-    Parses rgba(r, g, b, a) string into a tuple of 4 integers (0-255).
-    Handles alpha as 0-1 float (scales by 255) or as 0-255 int.
-    """
     try:
-        # Remove "rgba(" and ")" and split by comma
         parts_str = rgba_str.strip().lower()
         if not parts_str.startswith("rgba(") or not parts_str.endswith(")"):
             raise ValueError("Invalid RGBA string format")
@@ -190,22 +231,15 @@ def rgba_from_string(rgba_str: str) -> tuple[int, int, int, int]:
         a_str = parts_str_list[3].strip()
         a_float = float(a_str)
         
-        # If alpha string contains '.' and its float value is between 0 and 1,
-        # assume it's a 0.0-1.0 float that needs scaling.
-        # Otherwise, assume it's already a 0-255 value.
         if '.' in a_str and 0.0 <= a_float <= 1.0:
-            # Check if it's something like "1.0" which is effectively an integer after float conversion
-            # A more robust check might be needed if "1.0" should be treated as 1 out of 255 vs 1.0 * 255
-            # For now, this heuristic: if it looks like a typical float 0-1, scale it.
-            if len(a_str) > 1 and a_str != "0" and a_str != "1": # Avoid scaling "0" or "1" if they were meant as 0-255
+            if len(a_str) > 1 and a_str != "0" and a_str != "1":
                  a = int(round(a_float * 255.0))
-            else: # Treat "0", "1", "0.0", "1.0" as direct values if not clearly fractional for scaling
+            else:
                  a = int(round(a_float))
 
         else:
             a = int(round(a_float))
             
-        # Clamp all values to 0-255
         return (
             max(0, min(255, r)),
             max(0, min(255, g)),
@@ -214,44 +248,33 @@ def rgba_from_string(rgba_str: str) -> tuple[int, int, int, int]:
         )
     except Exception as e:
         logging.error(f"Error parsing RGBA string '{rgba_str}': {e}. Using default fallback color.")
-        return (0, 0, 0, 180) # Default fallback: semi-transparent black
+        return (0, 0, 0, 180)
 
 
-@app.post("/caption-image")
-def caption_image(req: CaptionRequest):
-    try:
-        logging.info(f"Received request: {req}")
+def _generate_background_once(
+    original_img: Image.Image,
+    text_position: Literal["top", "bottom"],
+    background_height: float,
+    background_color: str,
+    transition_proportion: float
+) -> dict[str, Union[str, Image.Image]]:
+    img = original_img.copy()
+    width, height = img.size
 
-        # Load image from URL
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
-        response = requests.get(req.image_url, headers=headers)
-        response.raise_for_status()
-        logging.info("Image fetched successfully.")
-
-        img = Image.open(io.BytesIO(response.content)).convert("RGBA")
-        width, height = img.size
-        logging.info(f"Image dimensions: {width}x{height}")
-
-        bg_height = int(height * req.background_height)
-        margin_x_px = int((req.margin_horizontal / 100) * width / 2) # Renamed for clarity
-        margin_top_px = int((req.margin_top / 100) * bg_height)
-        margin_bottom_px = int((req.margin_bottom / 100) * bg_height)
-        logging.info(f"Background height: {bg_height}, MarginX_px: {margin_x_px}, MarginTopPx: {margin_top_px}, MarginBottomPx: {margin_bottom_px}")
-
-        base_r, base_g, base_b, base_a = rgba_from_string(req.background_color)
-        overlay = Image.new("RGBA", (width, bg_height), (base_r, base_g, base_b, base_a))
-        
-        transition_height_px = int(round(bg_height * req.transition_proportion))
-        if transition_height_px > 0 and bg_height > 0:
-            pixels = overlay.load()
-            logging.info(f"Applying gradient transition. Height: {transition_height_px}px, Position: {req.text_position}, Base Alpha: {base_a}")
-
-            if req.text_position == "bottom": # Gradient at the top of the overlay
-                # Alpha goes from 0 (at y=0) to base_a (at y=transition_height_px-1)
+    bg_height = int(height * background_height)
+    
+    base_r, base_g, base_b, base_a = rgba_from_string(background_color)
+    overlay = Image.new("RGBA", (width, bg_height), (base_r, base_g, base_b, base_a))
+    
+    transition_height_px = int(round(bg_height * transition_proportion))
+    if transition_height_px > 0 and bg_height > 0:
+        pixels = overlay.load()
+        if pixels is None:
+            logging.warning("Failed to load overlay pixels for gradient transition")
+        else:
+            if text_position == "bottom":
                 for y_coord in range(transition_height_px):
-                    if transition_height_px == 1: # Single line of transition, make it fully transparent
+                    if transition_height_px == 1:
                         alpha_factor = 0.0 
                     else:
                         alpha_factor = y_coord / (transition_height_px - 1.0)
@@ -260,12 +283,10 @@ def caption_image(req: CaptionRequest):
                     for x_coord in range(width):
                         pixels[x_coord, y_coord] = (base_r, base_g, base_b, current_alpha)
             
-            elif req.text_position == "top": # Gradient at the bottom of the overlay
-                # Alpha goes from base_a (at y=bg_height-transition_height_px) to 0 (at y=bg_height-1)
+            elif text_position == "top":
                 transition_zone_start_y = bg_height - transition_height_px
                 for y_idx, y_coord in enumerate(range(transition_zone_start_y, bg_height)):
-                    # y_idx goes from 0 to transition_height_px-1
-                    if transition_height_px == 1: # Single line of transition, make it fully transparent
+                    if transition_height_px == 1:
                         alpha_factor = 0.0
                     else:
                         alpha_factor = (transition_height_px - 1.0 - y_idx) / (transition_height_px - 1.0)
@@ -273,218 +294,464 @@ def caption_image(req: CaptionRequest):
                     current_alpha = int(round(base_a * alpha_factor))
                     for x_coord in range(width):
                         pixels[x_coord, y_coord] = (base_r, base_g, base_b, current_alpha)
-            logging.info("Gradient applied to overlay.")
-        else:
-            logging.info("No gradient transition to apply (transition_height_px <= 0 or bg_height <= 0).")
 
-        # Prepare drawing context on the (potentially gradient) overlay
-        draw = ImageDraw.Draw(overlay)
-        
-        # --- NEW RICH TEXT PROCESSING ---
-        logical_lines_styled = parse_html_text(req.text)
-        logging.info(f"Parsed logical lines: {logical_lines_styled}")
+    background_only_img = img.copy()
+    if text_position == "bottom":
+        position = (0, height - bg_height)
+    else:
+        position = (0, 0)
+    background_only_img.alpha_composite(overlay, dest=position)
 
-        best_font_size = 0
-        final_renderable_lines_layout = [] 
+    bg_output_buffer = io.BytesIO()
+    background_only_img.save(bg_output_buffer, format="PNG")
+    bg_output_buffer.seek(0)
+    background_only_b64 = base64.b64encode(bg_output_buffer.getvalue()).decode('utf-8')
 
-        if any(line for line in logical_lines_styled):
-            font_size_iter = 1
-            max_iter_font_size = max(1, min(bg_height, width, 200))
+    return {
+        "background_only_b64": background_only_b64,
+        "overlay_image": overlay
+    }
 
-            while font_size_iter <= max_iter_font_size:
-                current_iter_renderable_lines = []
-                current_iter_total_height = 0
-                possible_to_fit_this_size = True
 
-                for logical_line in logical_lines_styled:
-                    if not possible_to_fit_this_size: break
-                    current_x = 0
-                    max_ascent_in_line = 0
-                    max_descent_in_line = 0
-                    segments_for_current_render_line = []
-                    drawable_units = []
-                    for text_segment, styles_segment in logical_line:
-                        parts = [p for p in re.split(r'(\s+)', text_segment) if p]
-                        for part_text in parts:
-                            drawable_units.append((part_text, styles_segment))
-                    
-                    if not drawable_units and not logical_line: 
-                        placeholder_font = get_font_for_style(req.font_family, font_size_iter, set())
-                        ph_ascent, ph_descent = placeholder_font.getmetrics()
-                        current_iter_total_height += (ph_ascent + ph_descent)
-                        current_iter_renderable_lines.append([]) 
-                        continue
+def _generate_text_and_combined_image_from_background(
+    original_img: Image.Image,
+    overlay_image: Image.Image,
+    text_content: str,
+    font_family: Literal["Montserrat", "Nunito", "Poppins", "Roboto"],
+    text_position: Literal["top", "bottom"],
+    background_height: float,
+    margin_horizontal: int,
+    margin_top: int,
+    margin_bottom: int,
+) -> dict[str, str]:
+    img = original_img.copy()
+    width, height = img.size
+    bg_height = int(height * background_height)
+    margin_x_px = int((margin_horizontal / 100) * width / 2)
+    margin_top_px = int((margin_top / 100) * bg_height)
+    margin_bottom_px = int((margin_bottom / 100) * bg_height)
 
-                    for unit_text, styles_unit in drawable_units:
-                        font_obj = get_font_for_style(req.font_family, font_size_iter, styles_unit)
-                        unit_width_measure = draw.textlength(unit_text, font=font_obj)
-                        ascent, descent = font_obj.getmetrics()
-                        if not unit_text.isspace() and current_x == 0 and unit_width_measure > (width - 2 * margin_x_px):
-                            possible_to_fit_this_size = False; break 
-                        if not unit_text.isspace() and current_x != 0 and (current_x + unit_width_measure) > (width - 2 * margin_x_px):
-                            if segments_for_current_render_line: 
-                                current_iter_renderable_lines.append({
-                                    "segments": segments_for_current_render_line,
-                                    "height": max_ascent_in_line + max_descent_in_line,
-                                    "max_ascent": max_ascent_in_line
-                                })
-                                current_iter_total_height += (max_ascent_in_line + max_descent_in_line)
-                            segments_for_current_render_line = []
-                            current_x = 0
-                            max_ascent_in_line = 0
-                            max_descent_in_line = 0
-                        max_ascent_in_line = max(max_ascent_in_line, ascent)
-                        max_descent_in_line = max(max_descent_in_line, descent)
-                        segments_for_current_render_line.append({
-                            "text": unit_text, "styles": styles_unit, "font": font_obj,
-                            "width": unit_width_measure, "ascent": ascent, "descent": descent,
-                            "bbox": font_obj.getbbox(unit_text)
-                        })
-                        current_x += unit_width_measure
-                    if not possible_to_fit_this_size: break
-                    if segments_for_current_render_line:
-                        current_iter_renderable_lines.append({
-                            "segments": segments_for_current_render_line,
-                            "height": max_ascent_in_line + max_descent_in_line,
-                            "max_ascent": max_ascent_in_line
-                        })
-                        current_iter_total_height += (max_ascent_in_line + max_descent_in_line)
-                if possible_to_fit_this_size and current_iter_total_height < (bg_height - margin_top_px - margin_bottom_px):
-                    best_font_size = font_size_iter
-                    final_renderable_lines_layout = current_iter_renderable_lines 
-                    font_size_iter += 1
-                else:
-                    break 
-        logging.info(f"Best font size for rich text: {best_font_size}")
+    text_on_bg_overlay = Image.new("RGBA", (width, bg_height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(text_on_bg_overlay)
+    
+    logical_lines_styled = parse_html_text(text_content)
 
-        # --- Drawing Rich Text ---
-        if best_font_size > 0 and final_renderable_lines_layout:
-            # Corrected call to get_font_for_style:
-            # font = get_font_for_style(best_font_size, set()) # OLD BUGGY LINE
-            font = get_font_for_style(req.font_family, best_font_size, set()) # FIXED: Added req.font_family and corrected argument order
-            
-            # Calculate total block height from the final layout for centering
-            actual_total_text_height = sum(line_info["height"] for line_info in final_renderable_lines_layout if isinstance(line_info, dict) and "height" in line_info) # Added check for dict
-            
-            available_height_for_text = bg_height - margin_top_px - margin_bottom_px
-            padding_top_final = 0
-            if actual_total_text_height > 0 and actual_total_text_height < available_height_for_text:
-                padding_top_final = (available_height_for_text - actual_total_text_height) // 2
-            
-            current_y = margin_top_px + padding_top_final
+    best_font_size = 0
+    final_renderable_lines_layout = [] 
 
-            for line_info in final_renderable_lines_layout:
-                if not line_info: # Handle explicitly empty lines from <br><br>
-                    # This case needs refinement: how much height for an empty line?
-                    # For now, assume it was accounted for if placeholder_font was used.
-                    # If line_info is truly empty list from parser, it means a <br>
-                    # We need a consistent line height. Let's use a dummy regular font for that.
-                    dummy_font_for_empty_line = get_font_for_style(req.font_family, best_font_size, set())
-                    empty_line_ascent, empty_line_descent = dummy_font_for_empty_line.getmetrics()
-                    current_y += (empty_line_ascent + empty_line_descent)
+    if any(line for line in logical_lines_styled):
+        font_size_iter = 1
+        max_iter_font_size = max(1, min(bg_height, width, 200))
+
+        while font_size_iter <= max_iter_font_size:
+            current_iter_renderable_lines = []
+            current_iter_total_height = 0
+            possible_to_fit_this_size = True
+
+            for logical_line in logical_lines_styled:
+                if not possible_to_fit_this_size: break
+                current_x = 0
+                max_ascent_in_line = 0
+                max_descent_in_line = 0
+                segments_for_current_render_line = []
+                drawable_units = []
+                for text_segment, styles_segment in logical_line:
+                    parts = [p for p in re.split(r'(\s+)', text_segment) if p]
+                    for part_text in parts:
+                        drawable_units.append((part_text, styles_segment))
+                
+                if not drawable_units and not logical_line: 
+                    placeholder_font = get_font_for_style(font_family, font_size_iter, set())
+                    ph_ascent, ph_descent = placeholder_font.getmetrics()
+                    current_iter_total_height += (ph_ascent + ph_descent)
+                    current_iter_renderable_lines.append([]) 
                     continue
 
-                line_segments = line_info["segments"]
-                line_actual_height = line_info["height"] # Max ascent + max descent for this line
-                line_max_ascent = line_info["max_ascent"]
+                for unit_text, styles_unit in drawable_units:
+                    font_obj = get_font_for_style(font_family, font_size_iter, styles_unit)
+                    unit_width_measure = draw.textlength(unit_text, font=font_obj)
+                    ascent, descent = font_obj.getmetrics()
+                    if not unit_text.isspace() and current_x == 0 and unit_width_measure > (width - 2 * margin_x_px):
+                        possible_to_fit_this_size = False; break 
+                    if not unit_text.isspace() and current_x != 0 and (current_x + unit_width_measure) > (width - 2 * margin_x_px):
+                        if segments_for_current_render_line: 
+                            current_iter_renderable_lines.append({
+                                "segments": segments_for_current_render_line,
+                                "height": max_ascent_in_line + max_descent_in_line,
+                                "max_ascent": max_ascent_in_line
+                            })
+                            current_iter_total_height += (max_ascent_in_line + max_descent_in_line)
+                        segments_for_current_render_line = []
+                        current_x = 0
+                        max_ascent_in_line = 0
+                        max_descent_in_line = 0
+                    max_ascent_in_line = max(max_ascent_in_line, ascent)
+                    max_descent_in_line = max(max_descent_in_line, descent)
+                    segments_for_current_render_line.append({
+                        "text": unit_text, "styles": styles_unit, "font": font_obj,
+                        "width": unit_width_measure, "ascent": ascent, "descent": descent,
+                        "bbox": font_obj.getbbox(unit_text)
+                    })
+                    current_x += unit_width_measure
+                if not possible_to_fit_this_size: break
+                if segments_for_current_render_line:
+                    current_iter_renderable_lines.append({
+                        "segments": segments_for_current_render_line,
+                        "height": max_ascent_in_line + max_descent_in_line,
+                        "max_ascent": max_ascent_in_line
+                    })
+                    current_iter_total_height += (max_ascent_in_line + max_descent_in_line)
+            if possible_to_fit_this_size and current_iter_total_height < (bg_height - margin_top_px - margin_bottom_px):
+                best_font_size = font_size_iter
+                final_renderable_lines_layout = current_iter_renderable_lines 
+                font_size_iter += 1
+            else:
+                break 
 
-                # Calculate total width of this specific line for horizontal centering
-                current_line_total_width = sum(seg["width"] for seg in line_segments)
-                
-                start_x_for_line = margin_x_px + (width - 2 * margin_x_px - current_line_total_width) // 2
-                start_x_for_line = max(margin_x_px, start_x_for_line) # Ensure left margin
+    if best_font_size > 0 and final_renderable_lines_layout:
+        font = get_font_for_style(font_family, best_font_size, set())
+        
+        actual_total_text_height = sum(line_info["height"] for line_info in final_renderable_lines_layout if isinstance(line_info, dict) and "height" in line_info)
+        
+        available_height_for_text = bg_height - margin_top_px - margin_bottom_px
+        padding_top_final = 0
+        if actual_total_text_height > 0 and actual_total_text_height < available_height_for_text:
+            padding_top_final = (available_height_for_text - actual_total_text_height) // 2
+        
+        current_y = margin_top_px + padding_top_final
 
-                current_x_draw = start_x_for_line
-                
-                for segment in line_segments:
-                    seg_text = segment["text"]
-                    seg_font = segment["font"] # Font object already created at correct size
-                    seg_styles = segment["styles"]
-                    # seg_width = segment["width"] # Calculated width
-                    seg_bbox = segment["bbox"] # (x1, y1, x2, y2)
-                    
-                    # Drawing text at (x, y) means y is the baseline for most fonts.
-                    # We need to align baselines of all segments in a line.
-                    # The line's y is current_y + line_max_ascent (baseline of the line)
-                    # Pillow's draw.text uses (left, top_of_text_bbox_relative_to_baseline) if anchor is not set.
-                    # Or, more simply, if xy is top-left, it handles baseline internally.
-                    # Let's use xy as the top-left for the segment, adjusted by its ascent relative to line's max_ascent
-                    # No, draw.text(xy, text) xy is the top-left corner of the text bounding box if anchor="la" (left-ascent)
-                    # Default anchor is "la".
-                    # xy is the position of the top-left corner of the text.
-                    # To align baselines: y_pos_for_segment = baseline_y - segment_ascent
-                    
-                    # Simpler: draw.text's y is the point for the baseline.
-                    # So, current_y + line_max_ascent is the common baseline for this line.
-                    
-                    # Pillow's default draw.text(xy,...) xy is the top-left of the bounding box.
-                    # To align different fonts on a baseline, it's complex.
-                    # A common approach: draw each segment at (current_x_draw, baseline_y - segment_ascent)
-                    # This aligns the top of the ascent boxes.
-                    # OR, use the baseline: current_y + line_max_ascent. Pillow text expects top-left.
-                    # So, y_draw_pos = (current_y + line_max_ascent) - segment_ascent
-                    
-                    y_draw_pos = current_y + (line_max_ascent - segment["ascent"])
+        for line_info in final_renderable_lines_layout:
+            if not line_info:
+                dummy_font_for_empty_line = get_font_for_style(font_family, best_font_size, set())
+                empty_line_ascent, empty_line_descent = dummy_font_for_empty_line.getmetrics()
+                current_y += (empty_line_ascent + empty_line_descent)
+                continue
 
-                    # Corrected drawing position:
-                    # current_x_draw is the left of the segment.
-                    # baseline_y is the common baseline for the line.
-                    # Pillow's text() method with default anchor "la" means xy is the top-left of the text.
-                    # The top of the text is at baseline_y - segment_ascent.
-                    # So, draw.text at (current_x_draw, baseline_y - segment["ascent"])
+            line_segments = line_info["segments"]
+            line_actual_height = line_info["height"]
+            line_max_ascent = line_info["max_ascent"]
 
-                    draw.text((current_x_draw, y_draw_pos), seg_text, font=seg_font, fill="white")
-
-                    if 'underline' in seg_styles:
-                        # Underline position: just below the text. Baseline + small offset.
-                        # Text bottom is baseline_y + segment_descent.
-                        # Or, more simply, bottom of the bbox for this segment.
-                        # bbox[3] is y2 (bottom). So, final_y_draw_pos + (seg_bbox[3]-seg_bbox[1]) is bottom of ink.
-                        # Underline y should be at final_y_draw_pos + (segment_bbox[3] - seg_bbox[1]) + offset
-                        # Let's try baseline + descent + offset.
-                        underline_y = y_draw_pos + segment["ascent"] + 1 # 1 pixel below baseline
-                        # A segment's ink bottom is at final_y_draw_pos + (seg_bbox[3] - seg_bbox[1])
-                        # Let's try to place it relative to the segment's own baseline.
-                        # Segment baseline is at final_y_draw_pos + segment["ascent"]
-                        underline_y_pos = y_draw_pos + segment["ascent"] + 2 # Offset below baseline
-                        draw.line([(current_x_draw, underline_y_pos), 
-                                   (current_x_draw + segment["width"], underline_y_pos)], 
-                                  fill="white", width=1) # Simple underline
-
-                    current_x_draw += segment["width"] # Use calculated width for advancing
-                
-                current_y += line_actual_height # Move to the next line's top
-            logging.info("Rich text drawn on overlay.")
-
-        elif not final_renderable_lines_layout and req.text.strip():
-             logging.info("Text was provided but could not be fitted into the margins with rich text.")
-        else:
-            logging.info("No text to draw or no fitting font size for rich text.")
+            current_line_total_width = sum(seg["width"] for seg in line_segments)
             
-        # Composite the overlay
-        result = img.copy()
-        if req.text_position == "bottom":
-            position = (0, height - bg_height)
-        else:
-            position = (0, 0)
-        result.alpha_composite(overlay, dest=position)
-        logging.info("Overlay composited onto image.")
+            start_x_for_line = margin_x_px + (width - 2 * margin_x_px - current_line_total_width) // 2
+            start_x_for_line = max(margin_x_px, start_x_for_line)
 
-        # Prepare output
-        output_buffer = io.BytesIO()
-        result.save(output_buffer, format="PNG")
-        output_buffer.seek(0)
-        logging.info("Image saved to buffer.")
-        return StreamingResponse(output_buffer, media_type="image/png")
+            current_x_draw = start_x_for_line
+            
+            for segment in line_segments:
+                seg_text = segment["text"]
+                seg_font = segment["font"]
+                seg_styles = segment["styles"]
+                
+                y_draw_pos = current_y + (line_max_ascent - segment["ascent"])
+
+                draw.text((current_x_draw, y_draw_pos), seg_text, font=seg_font, fill="white")
+
+                if 'underline' in seg_styles:
+                    underline_y_pos = y_draw_pos + segment["ascent"] + 2
+                    draw.line([(current_x_draw, underline_y_pos), 
+                               (current_x_draw + segment["width"], underline_y_pos)], 
+                              fill="white", width=1)
+
+                current_x_draw += segment["width"]
+            
+            current_y += line_actual_height
+    
+    text_only_full_image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    if text_position == "bottom":
+        text_paste_position = (0, height - bg_height)
+    else:
+        text_paste_position = (0, 0)
+    
+    text_only_full_image.paste(text_on_bg_overlay, text_paste_position)
+
+    text_output_buffer = io.BytesIO()
+    text_only_full_image.save(text_output_buffer, format="PNG")
+    text_output_buffer.seek(0)
+    text_only_b64 = base64.b64encode(text_output_buffer.getvalue()).decode('utf-8')
+
+    final_overlay_with_text = overlay_image.copy()
+    final_overlay_with_text.alpha_composite(text_on_bg_overlay, (0, 0))
+
+    final_combined_img = img.copy()
+    if text_position == "bottom":
+        position = (0, height - bg_height)
+    else:
+        position = (0, 0)
+    final_combined_img.alpha_composite(final_overlay_with_text, dest=position)
+
+    final_output_buffer = io.BytesIO()
+    final_combined_img.save(final_output_buffer, format="PNG")
+    final_output_buffer.seek(0)
+    final_combined_b64 = base64.b64encode(final_output_buffer.getvalue()).decode('utf-8')
+
+    result = {
+        "text_only": text_only_b64,
+        "final_combined": final_combined_b64
+    }
+    return result
+
+
+def _process_text_and_upload(
+    original_img_bytes: bytes,
+    overlay_image_bytes: bytes,
+    text_content: str,
+    font_family: Literal["Montserrat", "Nunito", "Poppins", "Roboto"],
+    text_position: Literal["top", "bottom"],
+    background_height: float,
+    margin_horizontal: int,
+    margin_top: int,
+    margin_bottom: int,
+    dropbox_dir: Optional[str],
+    text_index: int,
+) -> dict:
+    try:
+        original_img = Image.open(io.BytesIO(original_img_bytes))
+        overlay_image = Image.open(io.BytesIO(overlay_image_bytes))
+
+        captioned_images = _generate_text_and_combined_image_from_background(
+            original_img=original_img,
+            overlay_image=overlay_image,
+            text_content=text_content,
+            font_family=font_family,
+            text_position=text_position,
+            background_height=background_height,
+            margin_horizontal=margin_horizontal,
+            margin_top=margin_top,
+            margin_bottom=margin_bottom,
+        )
+
+        if dropbox_dir:
+            dbx = get_dbx_client_cached()
+            text_only_link = upload_and_get_link(
+                dbx,
+                base64.b64decode(captioned_images["text_only"]),
+                f"{dropbox_dir}/text_only/text_{text_index+1:02d}_text.png"
+            )
+            final_combined_link = upload_and_get_link(
+                dbx,
+                base64.b64decode(captioned_images["final_combined"]),
+                f"{dropbox_dir}/final_combined/text_{text_index+1:02d}_combined.png"
+            )
+            return {
+                "success": True, 
+                "text_only": text_only_link, 
+                "final_combined": final_combined_link
+            }
+        else:
+            return {
+                "success": True, 
+                "text_only": captioned_images["text_only"], 
+                "final_combined": captioned_images["final_combined"]
+            }
+    except Exception as e:
+        logging.error(f"Error processing text '{text_content}': {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/test")
+def test_endpoint():
+    return {"message": "Server is running updated code with three image outputs", "timestamp": "2025-07-17"}
+
+@app.post("/caption-image")
+async def caption_image(req: CaptionRequest):
+    try:
+        logging.info(f"Received request: {req}")
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        response = requests.get(req.image_url, headers=headers)
+        response.raise_for_status()
+        original_img = Image.open(io.BytesIO(response.content)).convert("RGBA")
+
+        background_data = _generate_background_once(
+            original_img=original_img,
+            text_position=req.text_position,
+            background_height=req.background_height,
+            background_color=req.background_color,
+            transition_proportion=req.transition_proportion
+        )
+        overlay_image = background_data["overlay_image"]
+        
+        if not isinstance(overlay_image, Image.Image):
+            raise TypeError("Generated overlay is not a valid PIL Image")
+
+        original_img_buffer = io.BytesIO()
+        original_img.save(original_img_buffer, format="PNG")
+        original_img_bytes = original_img_buffer.getvalue()
+
+        overlay_image_buffer = io.BytesIO()
+        overlay_image.save(overlay_image_buffer, format="PNG")
+        overlay_image_bytes = overlay_image_buffer.getvalue()
+
+        loop = asyncio.get_running_loop()
+        with ProcessPoolExecutor() as pool:
+            tasks = []
+            for i, text_content in enumerate(req.texts):
+                task = loop.run_in_executor(
+                    pool,
+                    _process_text_and_upload,
+                    original_img_bytes,
+                    overlay_image_bytes,
+                    text_content,
+                    req.font_family,
+                    req.text_position,
+                    req.background_height,
+                    req.margin_horizontal,
+                    req.margin_top,
+                    req.margin_bottom,
+                    req.dropbox_dir,
+                    i,
+                )
+                tasks.append(task)
+            
+            results = await asyncio.gather(*tasks)
+        
+        if req.dropbox_dir:
+            background_link = None
+            background_b64 = background_data.get("background_only_b64")
+            if isinstance(background_b64, str):
+                dbx = get_dbx_client_cached()
+                background_link = upload_and_get_link(
+                    dbx,
+                    base64.b64decode(background_b64),
+                    f"{req.dropbox_dir}/background.png"
+                )
+            return {
+                "background_only": background_link,
+                "images": results
+            }
+        else:
+            return {
+                "background_only": background_data["background_only_b64"],
+                "images": results
+            }
 
     except requests.exceptions.RequestException as e:
         logging.error(f"Error fetching image: {e}")
         raise HTTPException(status_code=400, detail="Error fetching image from the provided URL.")
-    except FileNotFoundError as e: # Should be less likely with fallbacks
-        logging.error(f"Font file not found and fallback failed: {e}")
-        raise HTTPException(status_code=500, detail="Critical font file not found on the server.")
     except Exception as e:
-        logging.error(f"Unexpected error in caption_image: {e}", exc_info=True) # Add exc_info for traceback
+        logging.error(f"Unexpected error in caption_image: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
-# ... (rest of the file, if any) ...
+
+def generate_video_from_script(
+    dropbox_folder_path: str,
+    audio_dropbox_path: Optional[str],
+    save_to_dropbox: bool,
+    video_duration_per_text: float,
+    fade_duration: float,
+    line_bottom_margin: int,
+    line_thickness: int,
+    line_color: str,
+    fps: int,
+):
+    """
+    Generates a video using the create_vid.sh script.
+    This function is intended to be run in the background.
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        try:
+            dbx = get_dbx_client_cached()
+            
+            # --- 1. Set up paths ---
+            background_img_name = "background.png"
+            text_img_dir_name = "text_images"
+            output_video_name = "generated_video.mp4"
+            
+            local_background_path = os.path.join(temp_dir, background_img_name)
+            local_text_dir = os.path.join(temp_dir, text_img_dir_name)
+            os.makedirs(local_text_dir, exist_ok=True)
+            local_output_path = os.path.join(temp_dir, output_video_name)
+            local_music_path = None
+
+            # --- 2. Download files from Dropbox ---
+            # Download background image
+            dropbox_bg_path = f"{dropbox_folder_path.rstrip('/')}/{background_img_name}"
+            logging.info(f"Downloading background from {dropbox_bg_path} to {local_background_path}")
+            dbx.files_download_to_file(local_background_path, dropbox_bg_path)
+            
+            # Download text images
+            dropbox_text_path = f"{dropbox_folder_path.rstrip('/')}/text_only"
+            logging.info(f"Downloading text images from {dropbox_text_path} to {local_text_dir}")
+            list_folder_result = dbx.files_list_folder(dropbox_text_path)
+            for entry in list_folder_result.entries:
+                if isinstance(entry, dropbox.files.FileMetadata):
+                    dest_path = os.path.join(local_text_dir, entry.name)
+                    dbx.files_download_to_file(dest_path, entry.path_lower)
+            
+            # Download music if provided
+            if audio_dropbox_path:
+                music_filename = os.path.basename(audio_dropbox_path)
+                local_music_path = os.path.join(temp_dir, music_filename)
+                logging.info(f"Downloading music from {audio_dropbox_path} to {local_music_path}")
+                dbx.files_download_to_file(local_music_path, audio_dropbox_path)
+
+            # --- 3. Execute the video generation script ---
+            script_path = "./create_vid.sh"
+            os.chmod(script_path, 0o755)
+
+            cmd = [
+                script_path,
+                "--text-dir", local_text_dir,
+                "--background", local_background_path,
+                "--output", local_output_path,
+                "--duration-per-text", str(video_duration_per_text),
+                "--fade-duration", str(fade_duration),
+                "--gif-y-offset", str(line_bottom_margin),
+                "--gif-height", str(line_thickness),
+                "--gif-color", line_color,
+                "--gif-framerate", str(fps),
+            ]
+            if local_music_path:
+                cmd.extend(["--music", local_music_path])
+            
+            logging.info(f"Executing command: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode != 0:
+                logging.error(f"Script execution failed with code {result.returncode}")
+                logging.error(f"STDOUT: {result.stdout}")
+                logging.error(f"STDERR: {result.stderr}")
+                raise Exception("Video generation script failed.")
+            else:
+                logging.info(f"Script executed successfully. STDOUT: {result.stdout}")
+
+            # --- 4. Upload generated video to Dropbox ---
+            if save_to_dropbox:
+                dropbox_video_path = f"{dropbox_folder_path.rstrip('/')}/{output_video_name}"
+                logging.info(f"Uploading video to {dropbox_video_path}")
+                upload_to_dropbox(dbx, local_output_path, dropbox_video_path)
+                logging.info("Video upload complete.")
+
+        except Exception as e:
+            logging.error(f"An error occurred in the video generation task: {e}", exc_info=True)
+
+
+@app.post("/generate-video")
+async def generate_video(req: VideoGenerationRequest, background_tasks: BackgroundTasks):
+    background_tasks.add_task(
+        generate_video_from_script,
+        dropbox_folder_path=req.dropbox_folder_path,
+        audio_dropbox_path=req.audio_dropbox_path,
+        save_to_dropbox=req.save_to_dropbox,
+        video_duration_per_text=req.video_duration_per_text,
+        fade_duration=req.fade_duration,
+        line_bottom_margin=req.line_bottom_margin,
+        line_thickness=req.line_thickness,
+        line_color=req.line_color,
+        fps=req.fps,
+    )
+
+    response_data = {
+        "message": "Video generation with script started in the background."
+    }
+
+    if req.save_to_dropbox:
+        video_name = "generated_video.mp4"
+        response_data["dropbox_video_path"] = f"{req.dropbox_folder_path.rstrip('/')}/{video_name}"
+    else:
+        response_data["local_video_path"] = "Local path not available when not saving to Dropbox."
+
+    return response_data
