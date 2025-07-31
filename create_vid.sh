@@ -86,8 +86,8 @@ else
     echo "Error: Neither 'magick' nor 'convert' command found. Please install ImageMagick."
     exit 1
 fi
-if ! command -v bc &> /dev/null; then
-    echo "Error: 'bc' command not found. Please install bc (basic calculator)."
+if ! command -v awk &> /dev/null; then
+    echo "Error: 'awk' command not found. Please install awk."
     exit 1
 fi
 
@@ -95,7 +95,8 @@ echo "Generating animated line GIF..."
 FRAMES_DIR="$TEMP_DIR/frames"
 PALETTE_FILE="$TEMP_DIR/palette.png"
 mkdir -p "$FRAMES_DIR"
-TOTAL_GIF_FRAMES=$(echo "$GIF_DURATION * $GIF_FRAMERATE" | bc)
+# Use awk for floating point multiplication and round to the nearest integer.
+TOTAL_GIF_FRAMES=$(awk -v d="$GIF_DURATION" -v r="$GIF_FRAMERATE" 'BEGIN {printf "%.0f", d*r}')
 
 for i in $(seq 1 $TOTAL_GIF_FRAMES); do
   current_width=$((i * GIF_WIDTH / TOTAL_GIF_FRAMES))
@@ -121,7 +122,8 @@ for i in $(seq 0 $(($NUM_TEXT_IMAGES - 1))); do
     segment_output_path="$TEMP_DIR/segment_$((i+1)).mp4"
     echo "Processing $text_img_path -> $segment_output_path"
 
-    fade_out_start=$(echo "$DURATION_PER_TEXT - $FADE_DURATION" | bc)
+    # Use awk for floating point subtraction.
+    fade_out_start=$(awk -v d="$DURATION_PER_TEXT" -v f="$FADE_DURATION" 'BEGIN {print d-f}')
 
     ffmpeg -y -loop 1 -i "$BACKGROUND_IMG" -loop 1 -i "$text_img_path" \
     -filter_complex "[1:v]format=rgba,fade=in:st=0:d=$FADE_DURATION:alpha=1,fade=out:st=$fade_out_start:d=$FADE_DURATION:alpha=1[txt];[0:v][txt]overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2" \
