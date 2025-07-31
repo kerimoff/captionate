@@ -12,17 +12,13 @@ URL="http://127.0.0.1:8000/generate-video"
 JSON_PAYLOAD='{
   "dropbox_folder_path": "/n8n/quantum_2025-07-30_10:07:36",
   "audio_dropbox_path": "/music_background/suspense-in-the-wood-360052.mp3",
-  "local_folder_path": null,
   "save_to_dropbox": true,
-  "video_duration_per_text": 3.0,
+  "video_duration_per_text": 2.0,
   "fade_duration": 0.2,
-  "line_horizontal_margin": 20,
-  "line_bottom_margin": 20,
+  "line_bottom_margin": 50,
   "line_thickness": 5,
   "line_color": "#FFFF00",
-  "fps": 30,
-  "codec": "libx264",
-  "line_segments_per_second": 30
+  "fps": 30
 }'
 
 # Send the POST request using curl

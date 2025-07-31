@@ -15,13 +15,14 @@ import base64
 import os
 import asyncio
 import sys
+import tempfile
+import subprocess
 from concurrent.futures import ProcessPoolExecutor
 from typing import Optional
 from dotenv import load_dotenv
 from dropbox.files import WriteMode
 from dropbox.exceptions import ApiError
-from video_generator_parameterized import create_video_with_parameters
-from scripts.dropbox_utils import get_dbx_client, upload_and_get_temporary_link as upload_and_get_link
+from scripts.dropbox_utils import get_dbx_client, upload_to_dropbox, upload_and_get_temporary_link as upload_and_get_link
 import dropbox
 
 load_dotenv()
@@ -114,18 +115,14 @@ class CaptionRequest(BaseModel):
 
 class VideoGenerationRequest(BaseModel):
     dropbox_folder_path: str
-    local_folder_path: Optional[str] = None
     audio_dropbox_path: Optional[str] = None
     save_to_dropbox: bool = False
     video_duration_per_text: float = 5.0
     fade_duration: float = 0.5
-    line_horizontal_margin: int = 20
     line_bottom_margin: int = 20
     line_thickness: int = 3
     line_color: str = "#FFFF00"
     fps: int = 30
-    codec: str = 'libx264'
-    line_segments_per_second: int = 30
 
 
 def get_font_for_style(font_family_name: str, base_size: int, styles: Set[str]) -> ImageFont.FreeTypeFont:
@@ -639,33 +636,122 @@ async def caption_image(req: CaptionRequest):
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
 
+def generate_video_from_script(
+    dropbox_folder_path: str,
+    audio_dropbox_path: Optional[str],
+    save_to_dropbox: bool,
+    video_duration_per_text: float,
+    fade_duration: float,
+    line_bottom_margin: int,
+    line_thickness: int,
+    line_color: str,
+    fps: int,
+):
+    """
+    Generates a video using the create_vid.sh script.
+    This function is intended to be run in the background.
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        try:
+            dbx = get_dbx_client_cached()
+            
+            # --- 1. Set up paths ---
+            background_img_name = "background.png"
+            text_img_dir_name = "text_images"
+            output_video_name = "generated_video.mp4"
+            
+            local_background_path = os.path.join(temp_dir, background_img_name)
+            local_text_dir = os.path.join(temp_dir, text_img_dir_name)
+            os.makedirs(local_text_dir, exist_ok=True)
+            local_output_path = os.path.join(temp_dir, output_video_name)
+            local_music_path = None
+
+            # --- 2. Download files from Dropbox ---
+            # Download background image
+            dropbox_bg_path = f"{dropbox_folder_path.rstrip('/')}/{background_img_name}"
+            logging.info(f"Downloading background from {dropbox_bg_path} to {local_background_path}")
+            dbx.files_download_to_file(local_background_path, dropbox_bg_path)
+            
+            # Download text images
+            dropbox_text_path = f"{dropbox_folder_path.rstrip('/')}/text_only"
+            logging.info(f"Downloading text images from {dropbox_text_path} to {local_text_dir}")
+            list_folder_result = dbx.files_list_folder(dropbox_text_path)
+            for entry in list_folder_result.entries:
+                if isinstance(entry, dropbox.files.FileMetadata):
+                    dest_path = os.path.join(local_text_dir, entry.name)
+                    dbx.files_download_to_file(dest_path, entry.path_lower)
+            
+            # Download music if provided
+            if audio_dropbox_path:
+                music_filename = os.path.basename(audio_dropbox_path)
+                local_music_path = os.path.join(temp_dir, music_filename)
+                logging.info(f"Downloading music from {audio_dropbox_path} to {local_music_path}")
+                dbx.files_download_to_file(local_music_path, audio_dropbox_path)
+
+            # --- 3. Execute the video generation script ---
+            script_path = "./create_vid.sh"
+            os.chmod(script_path, 0o755)
+
+            cmd = [
+                script_path,
+                "--text-dir", local_text_dir,
+                "--background", local_background_path,
+                "--output", local_output_path,
+                "--duration-per-text", str(video_duration_per_text),
+                "--fade-duration", str(fade_duration),
+                "--gif-y-offset", str(line_bottom_margin),
+                "--gif-height", str(line_thickness),
+                "--gif-color", line_color,
+                "--gif-framerate", str(fps),
+            ]
+            if local_music_path:
+                cmd.extend(["--music", local_music_path])
+            
+            logging.info(f"Executing command: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode != 0:
+                logging.error(f"Script execution failed with code {result.returncode}")
+                logging.error(f"STDOUT: {result.stdout}")
+                logging.error(f"STDERR: {result.stderr}")
+                raise Exception("Video generation script failed.")
+            else:
+                logging.info(f"Script executed successfully. STDOUT: {result.stdout}")
+
+            # --- 4. Upload generated video to Dropbox ---
+            if save_to_dropbox:
+                dropbox_video_path = f"{dropbox_folder_path.rstrip('/')}/{output_video_name}"
+                logging.info(f"Uploading video to {dropbox_video_path}")
+                upload_to_dropbox(dbx, local_output_path, dropbox_video_path)
+                logging.info("Video upload complete.")
+
+        except Exception as e:
+            logging.error(f"An error occurred in the video generation task: {e}", exc_info=True)
+
+
 @app.post("/generate-video")
 async def generate_video(req: VideoGenerationRequest, background_tasks: BackgroundTasks):
     background_tasks.add_task(
-        create_video_with_parameters,
+        generate_video_from_script,
         dropbox_folder_path=req.dropbox_folder_path,
         audio_dropbox_path=req.audio_dropbox_path,
-        local_folder_path=req.local_folder_path,
         save_to_dropbox=req.save_to_dropbox,
         video_duration_per_text=req.video_duration_per_text,
         fade_duration=req.fade_duration,
-        line_horizontal_margin=req.line_horizontal_margin,
         line_bottom_margin=req.line_bottom_margin,
         line_thickness=req.line_thickness,
         line_color=req.line_color,
         fps=req.fps,
-        codec=req.codec,
-        line_segments_per_second=req.line_segments_per_second,
     )
 
     response_data = {
-        "message": "Video generation started in the background."
+        "message": "Video generation with script started in the background."
     }
 
     if req.save_to_dropbox:
-        video_name = "moviepy_output.mp4"
+        video_name = "generated_video.mp4"
         response_data["dropbox_video_path"] = f"{req.dropbox_folder_path.rstrip('/')}/{video_name}"
     else:
-        response_data["local_video_path"] = "media/videos/moviepy_output.mp4"
+        response_data["local_video_path"] = "Local path not available when not saving to Dropbox."
 
     return response_data

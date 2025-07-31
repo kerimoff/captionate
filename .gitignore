@@ -4,4 +4,5 @@ __pycache__/
 results
 downloaded_files*
 media
+line_animation.gif
 .env
