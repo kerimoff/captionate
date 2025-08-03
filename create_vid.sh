@@ -125,8 +125,9 @@ for i in $(seq 0 $(($NUM_TEXT_IMAGES - 1))); do
     # Use awk for floating point subtraction.
     fade_out_start=$(awk -v d="$DURATION_PER_TEXT" -v f="$FADE_DURATION" 'BEGIN {print d-f}')
 
+    # Added scale filter to ensure even dimensions for the encoder.
     ffmpeg -y -loop 1 -i "$BACKGROUND_IMG" -loop 1 -i "$text_img_path" \
-    -filter_complex "[1:v]format=rgba,fade=in:st=0:d=$FADE_DURATION:alpha=1,fade=out:st=$fade_out_start:d=$FADE_DURATION:alpha=1[txt];[0:v][txt]overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2" \
+    -filter_complex "[1:v]format=rgba,fade=in:st=0:d=$FADE_DURATION:alpha=1,fade=out:st=$fade_out_start:d=$FADE_DURATION:alpha=1[txt];[0:v][txt]overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2,scale=trunc(iw/2)*2:trunc(ih/2)*2" \
     -t "$DURATION_PER_TEXT" -c:v libx264 -pix_fmt yuv420p -r 25 "$segment_output_path" >/dev/null 2>&1
     
     echo "file '$segment_output_path'" >> "$CONCAT_LIST_FILE"

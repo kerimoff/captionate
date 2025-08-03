@@ -1,4 +1,4 @@
-modules = ["python-3.12"]
+modules = ["python-3.12", "bash"]
 run = "uvicorn main:app --host 0.0.0.0 --port 3000"
 
 [nix]
@@ -7,7 +7,6 @@ packages = ["ffmpeg-full", "imagemagickBig", "libxcrypt", "xcodebuild", "zlib"]
 
 [deployment]
 run = ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port 3000"]
-build = ["sh", "-c", "pip install -r requirements.txt"]
 deploymentTarget = "cloudrun"
 
 [[ports]]
