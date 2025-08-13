@@ -22,7 +22,13 @@ from typing import Optional
 from dotenv import load_dotenv
 from dropbox.files import WriteMode
 from dropbox.exceptions import ApiError
-from scripts.dropbox_utils import get_dbx_client, upload_to_dropbox, upload_and_get_temporary_link as upload_and_get_link
+from scripts.dropbox_utils import (
+    get_dbx_client,
+    upload_to_dropbox,
+    upload_and_get_temporary_link as upload_and_get_link,
+    ensure_dropbox_folder,
+    upload_bytes,
+)
 import dropbox
 import time
 
@@ -579,7 +585,7 @@ def _generate_text_and_combined_image_from_background(
     return result
 
 
-def _process_text_and_upload(
+def _process_text(
     original_img_bytes: bytes,
     overlay_image_bytes: bytes,
     text_content: str,
@@ -589,7 +595,6 @@ def _process_text_and_upload(
     margin_horizontal: int,
     margin_top: int,
     margin_bottom: int,
-    dropbox_dir: Optional[str],
     text_index: int,
 ) -> dict:
     try:
@@ -607,27 +612,12 @@ def _process_text_and_upload(
             margin_top=margin_top,
             margin_bottom=margin_bottom,
         )
-
-        if dropbox_dir:
-            dbx = get_dbx_client_cached()
-            text_only_link = upload_and_get_link(
-                dbx, base64.b64decode(captioned_images["text_only"]),
-                f"{dropbox_dir}/text_only/text_{text_index+1:02d}_text.png")
-            final_combined_link = upload_and_get_link(
-                dbx, base64.b64decode(captioned_images["final_combined"]),
-                f"{dropbox_dir}/final_combined/text_{text_index+1:02d}_combined.png"
-            )
-            return {
-                "success": True,
-                "text_only": text_only_link,
-                "final_combined": final_combined_link
-            }
-        else:
-            return {
-                "success": True,
-                "text_only": captioned_images["text_only"],
-                "final_combined": captioned_images["final_combined"]
-            }
+        return {
+            "success": True,
+            "text_only": captioned_images["text_only"],
+            "final_combined": captioned_images["final_combined"],
+            "index": text_index,
+        }
     except Exception as e:
         logging.error(f"Error processing text '{text_content}': {e}",
                       exc_info=True)
@@ -680,7 +670,7 @@ async def caption_image(req: CaptionRequest):
             for i, text_content in enumerate(req.texts):
                 task = loop.run_in_executor(
                     pool,
-                    _process_text_and_upload,
+                    _process_text,
                     original_img_bytes,
                     overlay_image_bytes,
                     text_content,
@@ -690,7 +680,6 @@ async def caption_image(req: CaptionRequest):
                     req.margin_horizontal,
                     req.margin_top,
                     req.margin_bottom,
-                    req.dropbox_dir,
                     i,
                 )
                 tasks.append(task)
@@ -698,18 +687,49 @@ async def caption_image(req: CaptionRequest):
             results = await asyncio.gather(*tasks)
 
         if req.dropbox_dir:
-            background_link = None
+            # Ensure folders
+            dbx = get_dbx_client_cached()
+            ensure_dropbox_folder(dbx, req.dropbox_dir)
+            ensure_dropbox_folder(dbx, f"{req.dropbox_dir.rstrip('/')}/text_only")
+            ensure_dropbox_folder(dbx, f"{req.dropbox_dir.rstrip('/')}/final_combined")
+
+            # Upload background first
             background_b64 = background_data.get("background_only_b64")
             if isinstance(background_b64, str):
-                dbx = get_dbx_client_cached()
-                background_link = upload_and_get_link(
-                    dbx, base64.b64decode(background_b64),
-                    f"{req.dropbox_dir}/background.png")
-            return {"background_only": background_link, "images": results}
+                upload_bytes(
+                    dbx,
+                    base64.b64decode(background_b64),
+                    f"{req.dropbox_dir.rstrip('/')}/background.png",
+                )
+
+            # Upload each generated image sequentially
+            # Sort by index to ensure deterministic order
+            sorted_results = sorted(
+                [r for r in results if r.get("success")], key=lambda x: x.get("index", 0)
+            )
+            for r in sorted_results:
+                idx = int(r["index"]) + 1
+                text_only_b64 = r.get("text_only")
+                final_combined_b64 = r.get("final_combined")
+                if isinstance(text_only_b64, str):
+                    upload_bytes(
+                        dbx,
+                        base64.b64decode(text_only_b64),
+                        f"{req.dropbox_dir.rstrip('/')}/text_only/text_{idx:02d}_text.png",
+                    )
+                if isinstance(final_combined_b64, str):
+                    upload_bytes(
+                        dbx,
+                        base64.b64decode(final_combined_b64),
+                        f"{req.dropbox_dir.rstrip('/')}/final_combined/text_{idx:02d}_combined.png",
+                    )
+
+            n = len(req.texts)
+            return {"dropbox_dir": req.dropbox_dir, "message": f"{n} images generated"}
         else:
             return {
                 "background_only": background_data["background_only_b64"],
-                "images": results
+                "images": results,
             }
 
     except requests.exceptions.RequestException as e:

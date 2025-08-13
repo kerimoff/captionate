@@ -4,6 +4,7 @@ import logging
 from typing import Optional
 from dropbox.files import WriteMode, FileMetadata, FolderMetadata
 from dropbox.exceptions import ApiError, AuthError
+import time
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -105,3 +106,59 @@ def upload_to_dropbox(dbx: dropbox.Dropbox, local_file_path: str, dropbox_upload
             logger.info(f"Successfully uploaded {local_file_path} to {dropbox_upload_path}")
         except ApiError as e:
             raise RuntimeError(f"Error during Dropbox upload: {e}") from e 
+
+def ensure_dropbox_folder(dbx: dropbox.Dropbox, folder_path: str) -> None:
+    """Ensure a Dropbox folder exists (idempotent, creates parents as needed)."""
+    if not folder_path or folder_path == "/":
+        return
+    folder_path = folder_path.rstrip("/")
+    try:
+        md = dbx.files_get_metadata(folder_path)
+        if isinstance(md, FolderMetadata):
+            logger.info(f"Folder exists on Dropbox: {folder_path}")
+            return
+        raise RuntimeError(f"Path exists and is not a folder: {folder_path}")
+    except ApiError as err:
+        if err.error.is_path() and err.error.get_path().is_not_found():
+            parent = os.path.dirname(folder_path)
+            if parent and parent != "/" and parent != folder_path:
+                ensure_dropbox_folder(dbx, parent)
+            try:
+                dbx.files_create_folder_v2(folder_path)
+                logger.info(f"Created Dropbox folder: {folder_path}")
+            except ApiError as create_err:
+                # If another process created it between check and create
+                if create_err.error.is_path() and create_err.error.get_path().is_conflict():
+                    logger.info(f"Folder already created concurrently: {folder_path}")
+                else:
+                    raise
+        else:
+            raise
+
+def upload_bytes(
+    dbx: dropbox.Dropbox,
+    content_bytes: bytes,
+    dropbox_path: str,
+    retries: int = 3,
+    backoff: float = 1.5,
+) -> None:
+    """Upload raw bytes to Dropbox with retries and a simple post-upload verification."""
+    last_err: Optional[Exception] = None
+    for attempt in range(1, max(1, retries) + 1):
+        try:
+            dbx.files_upload(content_bytes, dropbox_path, mode=WriteMode("overwrite"))
+            md = dbx.files_get_metadata(dropbox_path)
+            if isinstance(md, FileMetadata) and md.size >= 0:
+                logger.info(f"Uploaded to Dropbox: {dropbox_path} (size={md.size})")
+            else:
+                logger.info(f"Uploaded to Dropbox: {dropbox_path}")
+            return
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                sleep_time = backoff ** (attempt - 1)
+                logger.warning(f"Upload failed for {dropbox_path} (attempt {attempt}/{retries}). Retrying in {sleep_time:.2f}s. Error: {e}")
+                time.sleep(sleep_time)
+            else:
+                break
+    raise RuntimeError(f"Failed to upload to Dropbox after {retries} attempts: {dropbox_path}. Last error: {last_err}")
