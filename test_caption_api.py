@@ -7,8 +7,8 @@ import time
 
 # Replace with your actual image URL and texts
 request_payload = {
-    "image_url": "https://www.dropbox.com/scl/fi/nwx011djhfzr51o56rj8x/octopus.jpg?rlkey=ko3jny2dfocjm12uvv3ylusue&st=oo3rji18&dl=1", # Replace with a real image URL
-    "dropbox_dir": "/temp_res",
+    "image_url": "https://www.dropbox.com/scl/fi/rhi3thkgcat4ywe6ri5jw/9_16.jpg?rlkey=3m9ir1zyxzmps901apbnpmbf0&st=x56gwxnh&dl=1", # Replace with a real image URL
+    "dropbox_dir": "/n8n/penguins_test/9_16",
     "text": [
         "Octopuses have <b>three hearts</b> that pump blue blood through their bodies.",
         "An octopus can squeeze through any opening <b>larger than its beak</b>.",

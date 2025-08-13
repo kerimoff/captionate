@@ -19,6 +19,7 @@ import tempfile
 import subprocess
 from concurrent.futures import ProcessPoolExecutor
 from typing import Optional
+import shutil
 from dotenv import load_dotenv
 from dropbox.files import WriteMode
 from dropbox.exceptions import ApiError
@@ -157,6 +158,8 @@ class VideoGenerationRequest(BaseModel):
     gif_offset_proportion: float = Field(default=0.2, ge=0.0, le=1.0)
     gif_duration: float = Field(default=2.0, ge=0.1)
     gif_framerate: int = Field(default=60, ge=1)
+    # Optional outro video to append at the end. Defaults to repo asset if present.
+    post_script_video_path: Optional[str] = None
 
 
 def get_font_for_style(font_family_name: str, base_size: int,
@@ -756,6 +759,7 @@ def generate_video_from_script(
     gif_offset_proportion: float,
     gif_duration: float,
     gif_framerate: int,
+    post_script_video_path: Optional[str],
 ):
     """
     Generates a video using the create_vid.sh script.
@@ -793,16 +797,39 @@ def generate_video_from_script(
             gif_width = int(img_width * gif_width_proportion)
             gif_y_offset = int(img_height * gif_offset_proportion)
 
-            # Download text images
+            # Download text images (handle pagination)
             dropbox_text_path = f"{dropbox_folder_path.rstrip('/')}/text_only"
             logging.info(
                 f"Downloading text images from {dropbox_text_path} to {local_text_dir}"
             )
-            list_folder_result = dbx.files_list_folder(dropbox_text_path)
-            for entry in list_folder_result.entries:
+            try:
+                list_folder_result = dbx.files_list_folder(dropbox_text_path)
+            except Exception as e:
+                logging.error(
+                    f"Failed listing Dropbox folder {dropbox_text_path}: {e}")
+                raise
+
+            total_entries = []
+            total_entries.extend(list_folder_result.entries)
+            while getattr(list_folder_result, 'has_more', False):
+                list_folder_result = dbx.files_list_folder_continue(
+                    list_folder_result.cursor)
+                total_entries.extend(list_folder_result.entries)
+
+            # Proceed to download files
+
+            for entry in total_entries:
                 if isinstance(entry, dropbox.files.FileMetadata):
                     dest_path = os.path.join(local_text_dir, entry.name)
+                    # Download each file into the local text image directory
                     dbx.files_download_to_file(dest_path, entry.path_lower)
+
+            # Verify text images exist
+            png_files = [f for f in os.listdir(local_text_dir) if f.lower().endswith('.png')]
+            if not png_files:
+                raise FileNotFoundError(
+                    f"No text images (.png) found in Dropbox folder '{dropbox_text_path}'. Ensure caption images exist in 'text_only'."
+                )
 
             # Download music if provided
             if audio_dropbox_path:
@@ -814,9 +841,26 @@ def generate_video_from_script(
                 dbx.files_download_to_file(local_music_path,
                                            audio_dropbox_path)
 
+            # Optionally list local files in debug builds (omitted in production)
+
             # --- 3. Execute the video generation script ---
-            script_path = "./create_vid.sh"
+            script_path = os.path.abspath(os.path.join(os.path.dirname(__file__),
+                                                       "create_vid.sh"))
             os.chmod(script_path, 0o755)
+
+            # Preflight dependency checks for clearer errors
+            missing_tools = []
+            if shutil.which('ffprobe') is None:
+                missing_tools.append('ffprobe (from ffmpeg)')
+            if shutil.which('ffmpeg') is None:
+                missing_tools.append('ffmpeg')
+            if shutil.which('magick') is None and shutil.which('convert') is None:
+                missing_tools.append('ImageMagick (magick/convert)')
+            if missing_tools:
+                raise EnvironmentError(
+                    "Missing required tools: " + ", ".join(missing_tools) +
+                    ". Please install them (e.g., brew install ffmpeg imagemagick)."
+                )
 
             cmd = [
                 script_path,
@@ -846,7 +890,22 @@ def generate_video_from_script(
             if local_music_path:
                 cmd.extend(["--music", local_music_path])
 
-            logging.info(f"Executing command: {' '.join(cmd)}")
+            # Append outro video if provided and exists
+            if post_script_video_path:
+                try:
+                    outro_path = post_script_video_path
+                    if not os.path.isabs(outro_path):
+                        outro_path = os.path.abspath(outro_path)
+                    if os.path.exists(outro_path):
+                        cmd.extend(["--post-script-video", outro_path])
+                    else:
+                        logging.warning(
+                            f"Post script video not found at {outro_path}. Skipping outro.")
+                except Exception as e:
+                    logging.warning(
+                        f"Failed to attach post script video '{post_script_video_path}': {e}")
+
+            logging.info("Executing video generation pipeline")
             result = subprocess.run(cmd, capture_output=True, text=True)
 
             if result.returncode != 0:
@@ -854,7 +913,17 @@ def generate_video_from_script(
                     f"Script execution failed with code {result.returncode}")
                 logging.error(f"STDOUT: {result.stdout}")
                 logging.error(f"STDERR: {result.stderr}")
-                raise Exception("Video generation script failed.")
+                raise RuntimeError(
+                    "Video generation script failed. "
+                    f"Exit code: {result.returncode}. "
+                    f"STDOUT: {result.stdout.strip()} "
+                    f"STDERR: {result.stderr.strip()}"
+                )
+
+            # Verify output presence; if missing, try to recover by locating any mp4 in temp_dir
+            if not os.path.exists(local_output_path):
+                raise FileNotFoundError(
+                    f"Output video not found at {local_output_path}.")
             else:
                 logging.info(
                     f"Script executed successfully. STDOUT: {result.stdout}")
@@ -889,6 +958,7 @@ def generate_video(req: VideoGenerationRequest):
             gif_offset_proportion=req.gif_offset_proportion,
             gif_duration=req.gif_duration,
             gif_framerate=req.gif_framerate,
+            post_script_video_path=req.post_script_video_path,
         )
 
         end_time = time.time()  # End timing
