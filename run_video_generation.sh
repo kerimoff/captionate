@@ -22,7 +22,7 @@ JSON_PAYLOAD='{
   "line_thickness": 5,
   "line_color": "#FFFF00",
   "fps": 60,
-  "post_script_video_path": "assets/outro .mov"
+  "post_script_video_path": "/outros/outro_instragram_eng.mov"
 }'
 
 # Send the POST request using curl

@@ -890,17 +890,31 @@ def generate_video_from_script(
             if local_music_path:
                 cmd.extend(["--music", local_music_path])
 
-            # Append outro video if provided and exists
+            # Append outro video:
+            # - If a local path exists, use it
+            # - Otherwise, treat provided string as a Dropbox path and download
             if post_script_video_path:
                 try:
-                    outro_path = post_script_video_path
-                    if not os.path.isabs(outro_path):
-                        outro_path = os.path.abspath(outro_path)
-                    if os.path.exists(outro_path):
-                        cmd.extend(["--post-script-video", outro_path])
+                    outro_local_path: Optional[str] = None
+                    provided = post_script_video_path
+                    # Use local file if it exists (absolute or relative)
+                    if os.path.isabs(provided) and os.path.exists(provided):
+                        outro_local_path = provided
+                    elif os.path.exists(provided):
+                        outro_local_path = os.path.abspath(provided)
+                    else:
+                        # Download from Dropbox to temp_dir
+                        outro_name = os.path.basename(provided.rstrip('/')) or "outro.mov"
+                        outro_local_path = os.path.join(temp_dir, outro_name)
+                        logging.info(
+                            f"Downloading outro from Dropbox '{provided}' to '{outro_local_path}'")
+                        dbx.files_download_to_file(outro_local_path, provided)
+
+                    if outro_local_path and os.path.exists(outro_local_path):
+                        cmd.extend(["--post-script-video", outro_local_path])
                     else:
                         logging.warning(
-                            f"Post script video not found at {outro_path}. Skipping outro.")
+                            f"Post script video not found or failed to download: {post_script_video_path}. Skipping outro.")
                 except Exception as e:
                     logging.warning(
                         f"Failed to attach post script video '{post_script_video_path}': {e}")
