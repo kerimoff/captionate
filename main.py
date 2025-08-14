@@ -162,6 +162,16 @@ class VideoGenerationRequest(BaseModel):
     post_script_video_path: Optional[str] = None
 
 
+class AttachOutroRequest(BaseModel):
+    main_video_path: Optional[str] = None
+    outro_video_path: Optional[str] = None
+    dropbox_main_video_path: Optional[str] = None
+    dropbox_outro_video_path: Optional[str] = None
+    output_filename: Optional[str] = None
+    save_to_dropbox: bool = False
+    dropbox_output_folder: Optional[str] = None
+
+
 def get_font_for_style(font_family_name: str, base_size: int,
                        styles: Set[str]) -> ImageFont.FreeTypeFont:
     is_bold = 'bold' in styles
@@ -1001,3 +1011,129 @@ def generate_video(req: VideoGenerationRequest):
         logging.error(f"Error in video generation: {e}", exc_info=True)
         raise HTTPException(status_code=500,
                             detail=f"Video generation failed: {str(e)}")
+
+
+@app.post("/attach-outro")
+def attach_outro(req: AttachOutroRequest):
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dbx = get_dbx_client_cached()
+
+            def resolve_local_or_download(src_path: str, default_name: str) -> str:
+                if os.path.isabs(src_path) and os.path.exists(src_path):
+                    return src_path
+                if os.path.exists(src_path):
+                    return os.path.abspath(src_path)
+                # Treat as Dropbox path
+                dest = os.path.join(temp_dir, default_name)
+                try:
+                    logging.info(f"Downloading from Dropbox '{src_path}' to '{dest}'")
+                    dbx.files_download_to_file(dest, src_path)
+                    return dest
+                except Exception as e:
+                    raise FileNotFoundError(
+                        f"Could not locate '{src_path}' locally and failed to download from Dropbox: {e}")
+
+            # Prefer explicit Dropbox paths when provided; ignore local paths in that case
+            if req.dropbox_main_video_path and req.dropbox_main_video_path.strip():
+                main_src_dp = req.dropbox_main_video_path.strip()
+                main_local_name = os.path.basename(main_src_dp) or "main.mp4"
+                main_local = os.path.join(temp_dir, main_local_name)
+                logging.info(f"Downloading main video from Dropbox '{main_src_dp}' to '{main_local}'")
+                dbx.files_download_to_file(main_local, main_src_dp)
+            else:
+                if not req.main_video_path:
+                    raise HTTPException(status_code=400, detail="Either main_video_path or dropbox_main_video_path is required")
+                main_local = resolve_local_or_download(
+                    req.main_video_path,
+                    (os.path.basename(req.main_video_path) if req.main_video_path else None) or "main.mp4",
+                )
+
+            if req.dropbox_outro_video_path and req.dropbox_outro_video_path.strip():
+                outro_src_dp = req.dropbox_outro_video_path.strip()
+                outro_local_name = os.path.basename(outro_src_dp) or "outro.mov"
+                outro_local = os.path.join(temp_dir, outro_local_name)
+                logging.info(f"Downloading outro video from Dropbox '{outro_src_dp}' to '{outro_local}'")
+                dbx.files_download_to_file(outro_local, outro_src_dp)
+            else:
+                if not req.outro_video_path:
+                    raise HTTPException(status_code=400, detail="Either outro_video_path or dropbox_outro_video_path is required")
+                outro_local = resolve_local_or_download(
+                    req.outro_video_path,
+                    (os.path.basename(req.outro_video_path) if req.outro_video_path else None) or "outro.mov",
+                )
+
+            script_path = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "attach_outro.sh"))
+            if not os.path.exists(script_path):
+                raise FileNotFoundError(
+                    f"attach_outro.sh not found at {script_path}.")
+            os.chmod(script_path, 0o755)
+
+            output_name = (
+                req.output_filename
+                if req.output_filename and req.output_filename.strip()
+                else f"{os.path.splitext(os.path.basename(main_local))[0]}_with_outro.mp4"
+            )
+            local_output_path = os.path.join(temp_dir, output_name)
+
+            cmd = [script_path, main_local, outro_local, local_output_path]
+            logging.info(f"Executing attach_outro.sh: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                logging.error(
+                    f"attach_outro.sh failed with code {result.returncode}")
+                logging.error(f"STDOUT: {result.stdout}")
+                logging.error(f"STDERR: {result.stderr}")
+                raise RuntimeError(
+                    "Failed to attach outro. "
+                    f"Exit code: {result.returncode}. "
+                    f"STDOUT: {result.stdout.strip()} "
+                    f"STDERR: {result.stderr.strip()}"
+                )
+
+            if not os.path.exists(local_output_path):
+                raise FileNotFoundError(
+                    f"Expected output not found: {local_output_path}")
+
+            if req.save_to_dropbox:
+                if not req.dropbox_output_folder:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "dropbox_output_folder is required when "
+                            "save_to_dropbox is true"
+                        ),
+                    )
+                dest = f"{req.dropbox_output_folder.rstrip('/')}/{output_name}"
+                logging.info(f"Uploading result to Dropbox: {dest}")
+                upload_to_dropbox(dbx, local_output_path, dest)
+                try:
+                    link = upload_and_get_link(dbx, local_output_path, dest)
+                except Exception:
+                    link = None
+                return {
+                    "message": "Outro attached and uploaded to Dropbox.",
+                    "dropbox_path": dest,
+                    "temporary_link": link,
+                }
+
+            # Stream the file back to the client
+            file_size = os.path.getsize(local_output_path)
+            with open(local_output_path, "rb") as f:
+                video_bytes = f.read()
+            return StreamingResponse(
+                io.BytesIO(video_bytes),
+                media_type="video/mp4",
+                headers={
+                    "Content-Length": str(len(video_bytes)),
+                    "Content-Disposition": f"attachment; filename=\"{output_name}\"",
+                },
+            )
+
+    except FileNotFoundError as e:
+        logging.error(str(e))
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logging.error(f"Error in attach_outro endpoint: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to attach outro: {e}")
